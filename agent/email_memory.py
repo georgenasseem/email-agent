@@ -1023,3 +1023,51 @@ def propose_categories_from_history(min_sender_count: int = 2) -> List[dict]:
                 break
 
     return proposals
+
+
+def filter_proposals_with_llm(proposals: List[dict]) -> List[dict]:
+    """Use a fast LLM call to prune bad category proposals.
+
+    Filters out generic words (e.g. 'week', 'today'), fragments of proper
+    nouns (e.g. 'dhabi'), and anything that wouldn't make a sensible email
+    category name.  Returns the subset of *proposals* the LLM approved.
+    """
+    if not proposals:
+        return []
+    try:
+        from agent.llm import get_llm
+        from langchain_core.messages import SystemMessage, HumanMessage
+        import json as _json
+
+        names = [p["proposed_name"] for p in proposals]
+        system = (
+            "You are a filter for email category suggestions. "
+            "The user will give you a JSON list of proposed category names extracted from email subjects. "
+            "Return ONLY a JSON array containing the names that would make GOOD email categories. "
+            "Remove:\n"
+            "- Generic time words (week, today, tomorrow, monday, etc.)\n"
+            "- Common filler words or fragments (update, form, action, check, etc.)\n"
+            "- Fragments of proper nouns that are meaningless on their own (e.g. 'dhabi' from 'Abu Dhabi')\n"
+            "- Anything too vague to be a useful category\n"
+            "Keep names that represent a clear, meaningful topic (e.g. Hackathon, Research, Students, Mentors, Proposal, Internship, Finance).\n"
+            "Output ONLY the JSON array. No explanation."
+        )
+        llm = get_llm(task="decide")  # fast/light model
+        raw = llm.invoke(
+            [SystemMessage(content=system), HumanMessage(content=_json.dumps(names))],
+            max_tokens=300,
+        )
+        text = (raw if isinstance(raw, str) else raw.content).strip()
+        # Extract JSON array
+        import re as _re
+        text = _re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = _re.sub(r"```\s*$", "", text).strip()
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end > start:
+            text = text[start:end + 1]
+        good_names = set(n.lower() for n in _json.loads(text) if isinstance(n, str))
+        return [p for p in proposals if p["proposed_name"].lower() in good_names]
+    except Exception:
+        # If LLM fails, return originals unfiltered
+        return proposals

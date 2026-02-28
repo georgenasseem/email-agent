@@ -25,6 +25,7 @@ from agent.email_memory import (
     add_todo_item, get_todo_items, remove_todo_item,
     get_all_labels, get_enabled_labels, create_label, delete_label,
     record_category_override, propose_categories_from_history,
+    filter_proposals_with_llm,
     ensure_default_labels, apply_rule_to_existing_emails,
 )
 from agent.decision_suggester import suggest_decision
@@ -785,31 +786,39 @@ with draft_col:
         # ── Suggested Categories (auto-triggered on every tab open) ──
         st.markdown("---")
         # Fetch proposals each time the Categories tab is shown
-        # (cheap DB query, always up-to-date)
-        _proposals = propose_categories_from_history(min_sender_count=2)
-        if _proposals:
-            st.session_state["_cat_proposals"] = _proposals
-        else:
-            st.session_state.pop("_cat_proposals", None)
+        # (cheap DB query + quick LLM filter, always up-to-date)
+        if "_cat_proposals" not in st.session_state or st.session_state.get("_cat_proposals_stale", True):
+            _raw_proposals = propose_categories_from_history(min_sender_count=2)
+            _proposals = filter_proposals_with_llm(_raw_proposals) if _raw_proposals else []
+            if _proposals:
+                st.session_state["_cat_proposals"] = _proposals
+            else:
+                st.session_state.pop("_cat_proposals", None)
+            st.session_state["_cat_proposals_stale"] = False
 
         if st.session_state.get("_cat_proposals"):
             st.markdown("**Suggested Categories**")
-            # Muted pill styling for suggestion buttons
+            # Muted inline pill styling — auto-width, transparent background
             st.markdown(
                 "<style>"
-                "div[data-testid='stVerticalBlock'] .suggest-cat-wrap .stButton>button {"
+                ".suggest-cat-wrap .stButton {display: inline-block !important; width: auto !important;}"
+                ".suggest-cat-wrap .stButton>button {"
                 "  background: transparent !important;"
                 "  border: 1px solid #475569 !important;"
                 "  color: #cbd5e1 !important;"
                 "  font-weight: 400 !important;"
                 "  font-size: 13px !important;"
+                "  padding: 4px 16px !important;"
+                "  width: auto !important;"
+                "  min-width: 0 !important;"
                 "}"
-                "div[data-testid='stVerticalBlock'] .suggest-cat-wrap .stButton>button:hover {"
-                "  background: #334155 !important;"
+                ".suggest-cat-wrap .stButton>button:hover {"
+                "  background: #1e293b !important;"
                 "  border-color: #64748b !important;"
                 "  color: #f1f5f9 !important;"
                 "  box-shadow: none !important;"
                 "}"
+                ".suggest-cat-wrap {display: flex; flex-wrap: wrap; gap: 8px;}"
                 "</style>",
                 unsafe_allow_html=True,
             )
@@ -817,7 +826,7 @@ with draft_col:
             _sug_container.markdown('<div class="suggest-cat-wrap">', unsafe_allow_html=True)
             with _sug_container:
                 for pi, prop in enumerate(st.session_state["_cat_proposals"]):
-                    if st.button(prop["proposed_name"], key=f"accept_prop_{pi}", use_container_width=True):
+                    if st.button(prop["proposed_name"], key=f"accept_prop_{pi}"):
                         try:
                             from agent.email_memory import get_label_by_slug, _slugify, upsert_rule
                             _prop_slug = _slugify(prop["proposed_name"])
@@ -855,6 +864,7 @@ with draft_col:
                                             _se["category"] = ",".join(_se_cats)
                             st.success(f"Created '{prop['proposed_name']}' – applied to {_applied} email{'s' if _applied != 1 else ''}")
                             st.session_state["_cat_proposals"].pop(pi)
+                            st.session_state["_cat_proposals_stale"] = True
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
