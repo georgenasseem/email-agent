@@ -1,0 +1,30 @@
+# Environment
+venv/
+.venv/
+.env
+*.pyc
+__pycache__/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OAuth tokens
+token.json
+credentials.json
+
+# Build / cache artifacts
+.uv_cache/
+.pytest_cache/
+
+# Large model files
+models/**/*.gguf
+
+# SQLite database
+data/*.db
+
+# User data (PII)
+data/profile.json
+data/style_profile.json
+data/style_samples/
