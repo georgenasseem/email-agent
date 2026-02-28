@@ -25,7 +25,7 @@ def suggest_decision(email: dict) -> dict:
 Each action MUST start with exactly one of these prefixes:
 - "Reply: " — a short description of a reply to send TO THE SENDER (e.g. "Reply: Accept the invitation", "Reply: Ask for more details")
 - "Todo: " — a short task the user should do based on this email (e.g. "Todo: Submit hackathon form by Friday", "Todo: Review attached document")
-- "Schedule: " — for meeting/scheduling requests. Creates a calendar event with free slot lookup. (e.g. "Schedule: 30 min meeting with sender", "Schedule: 1 hour project review")
+- "Schedule: " — for meeting/scheduling requests. Creates a calendar event with free slot lookup. (e.g. "Schedule: meeting with John", "Schedule: project review session")
 
 CRITICAL RULES:
 - Reply actions are messages TO SEND to the other person. They must make sense as something you'd say TO THEM.
@@ -33,7 +33,10 @@ CRITICAL RULES:
 - Replies must be conversational actions: accepting, declining, requesting info, confirming, thanking, asking questions, etc.
 - Only suggest Reply actions if the email actually warrants a reply. Newsletters, automated notifications, marketing emails, FYI-only emails, and system confirmations do NOT need replies.
 - If the email is purely informational (a notification, receipt, or announcement), suggest ONLY Todo actions or no actions at all.
-- If the email asks to schedule a meeting, call, appointment, or catch-up, ALWAYS include at least one "Schedule:" action.
+- If the email mentions a meeting, call, appointment, or catch-up, ALWAYS include one "Schedule:" action.
+- Schedule actions describe WHAT to schedule, NEVER specific dates or times. The scheduling system will check the user's calendar for availability. Examples:
+  GOOD: "Schedule: meeting with Dr. Smith", "Schedule: workshop follow-up call"
+  BAD: "Schedule: 1:45 PM meeting", "Schedule: meeting on March 5th", "Schedule: 30 min call at 2pm"
 - Todo actions should be concrete, one-sentence tasks extracted from the email content.
 - Suggest 1-4 actions total. Quality over quantity — fewer good suggestions beat many bad ones.
 - Each action description should be concise (under 10 words after the prefix).

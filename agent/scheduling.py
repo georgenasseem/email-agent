@@ -13,12 +13,16 @@ def propose_meeting_times(
     duration_minutes: int | None = None,
     max_slots: int = 5,
     force: bool = False,
+    title_hint: str = "",
 ) -> dict[str, Any]:
     """Extract meeting intent from email and propose free time slots.
 
     When *force* is True (e.g. user explicitly clicked Schedule), skip the
     LLM intent gate and build a sensible fallback intent from the email
     metadata so scheduling always proceeds.
+
+    *title_hint* is an optional short description from the quick-action button
+    (e.g. "meeting with FFIRs") used to improve the fallback title.
 
     Returns dict with meeting_intent, free_slots (list of (start, end) as ISO strings), error.
     """
@@ -28,14 +32,19 @@ def propose_meeting_times(
             return {"meeting_intent": intent, "free_slots": [], "error": "No meeting intent detected"}
         # User explicitly asked to schedule — build fallback intent
         sender = extract_email_address(email.get("sender", ""))
-        subject = (email.get("subject") or "Meeting")[:100]
+        # Prefer title_hint from the Schedule button, fall back to subject
+        fallback_title = title_hint if title_hint else (email.get("subject") or "Meeting")[:100]
         intent = {
             "has_meeting_intent": True,
-            "title": subject,
+            "title": fallback_title,
             "duration_minutes": duration_minutes or 30,
             "attendees": [sender] if sender else [],
             "notes": "",
         }
+    else:
+        # LLM extracted intent — still prefer title_hint if provided (more specific)
+        if title_hint:
+            intent["title"] = title_hint
 
     # Ensure sender is in attendees if not already
     sender_email = extract_email_address(email.get("sender", ""))

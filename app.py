@@ -990,15 +990,17 @@ with draft_col:
                         with st.container(key=f"qa-sched-{eid}-{j}"):
                             if st.button(opt, key=f"qa_{eid}_{j}", use_container_width=True):
                                 st.session_state[f"schedule_pending_{eid}"] = True
+                                st.session_state[f"schedule_desc_{eid}"] = opt[len("Schedule:"):].strip()
                                 st.rerun()
 
             # ── Scheduling flow (triggered by Schedule: action) ──────
             if st.session_state.get(f"schedule_pending_{eid}"):
                 sched_key = f"schedule_result_{eid}"
+                _sched_desc = st.session_state.get(f"schedule_desc_{eid}", "")
                 if sched_key not in st.session_state:
                     with st.spinner("Finding free time slots..."):
                         try:
-                            result = propose_meeting_times(email, days_ahead=7, max_slots=5, force=True)
+                            result = propose_meeting_times(email, days_ahead=7, max_slots=5, force=True, title_hint=_sched_desc)
                             st.session_state[sched_key] = result
                         except Exception as e:
                             st.error(f"Scheduling error: {e}")
@@ -1039,18 +1041,21 @@ with draft_col:
                                     st.success(f"Event created: {meeting_summary}")
                                     # Clean up scheduling state
                                     st.session_state.pop(f"schedule_pending_{eid}", None)
+                                    st.session_state.pop(f"schedule_desc_{eid}", None)
                                     st.session_state.pop(sched_key, None)
                                 except Exception as e:
                                     st.error(f"Failed to create event: {e}")
                             st.rerun()
                     if st.button("Cancel scheduling", key=f"sched_cancel_{eid}"):
                         st.session_state.pop(f"schedule_pending_{eid}", None)
+                        st.session_state.pop(f"schedule_desc_{eid}", None)
                         st.session_state.pop(sched_key, None)
                         st.rerun()
                 else:
                     st.info("No available slots found in the next 7 days.")
                     if st.button("Cancel", key=f"sched_cancel2_{eid}"):
                         st.session_state.pop(f"schedule_pending_{eid}", None)
+                        st.session_state.pop(f"schedule_desc_{eid}", None)
                         st.session_state.pop(sched_key, None)
                         st.rerun()
 
