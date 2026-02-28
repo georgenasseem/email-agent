@@ -5,7 +5,7 @@ from langchain_core.output_parsers import StrOutputParser
 from agent.llm import get_llm
 from agent.email_memory import build_memory_context, match_rules_for_email, get_enabled_labels
 
-CATEGORIES = ["urgent", "important", "normal", "low", "newsletter"]
+CATEGORIES = ["urgent", "important", "normal", "informational", "newsletter"]
 
 
 def _build_preview(email: dict) -> str:
@@ -99,11 +99,11 @@ CATEGORIES (use exactly these words):
 - urgent: MUST act TODAY. Security alerts, account verification, boss/CEO urgent requests, same-day deadlines.
 - important: Act within 24-48h. Client requests, approvals, feedback, rescheduling, time-sensitive offers.
 - normal: Routine. Meeting reminders, confirmations, coordination, FYI. Default when unsure.
-- low: Informational only, no action. Event listings, general updates.
+- informational: Informational only, no action. Event listings, general updates.
 - newsletter: Marketing, newsletters, promotions, unsubscribe links, mass mailings.{user_labels_block}
 
 CRITICAL:
-- "newsletter" or "low": Newsletters, event listings, marketing, promotions, "click here", tracking pixels, noreply senders. NEVER "urgent".
+- "newsletter" or "informational": Newsletters, event listings, marketing, promotions, "click here", tracking pixels, noreply senders. NEVER "urgent".
 - "urgent": Security alert, token expired, verify account, password reset, same-day deadline from boss.
 - "normal": Default. Reminders, confirmations, routine updates, meeting locations.
 

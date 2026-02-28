@@ -3,6 +3,7 @@ import os
 import re
 import html
 import hashlib
+import random
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -23,7 +24,7 @@ from agent.email_memory import (
     get_email_count,
     add_todo_item, get_todo_items, remove_todo_item,
     get_all_labels, get_enabled_labels, create_label, update_label, delete_label,
-    get_all_rules, delete_rule, record_category_override, propose_categories_from_history,
+    record_category_override, propose_categories_from_history,
     ensure_default_labels,
 )
 from agent.decision_suggester import suggest_decision
@@ -595,6 +596,11 @@ emails = st.session_state["emails"]
 
 filtered = emails
 
+# Apply category filter if active
+_active_cat_filter = st.session_state.get("_cat_filter")
+if _active_cat_filter:
+    filtered = [e for e in filtered if e.get("category", "normal") == _active_cat_filter]
+
 # Always sort by newest first
 filtered.sort(key=lambda x: x.get("internal_date", 0), reverse=True)
 
@@ -626,14 +632,20 @@ with draft_col:
         all_labels = get_all_labels()
 
         # ── Add new label ──
+        # Curated palette of pleasant, non-annoying colours
+        _NICE_COLORS = [
+            "#38bdf8", "#34d399", "#a78bfa", "#fb923c",
+            "#f472b6", "#22d3ee", "#4ade80", "#c084fc",
+            "#f87171", "#60a5fa", "#2dd4bf", "#e879f9",
+        ]
         with st.expander("Add new category", expanded=False):
             new_name = st.text_input("Name", key="new_cat_name", placeholder="e.g. Advising")
-            new_color = st.color_picker("Color", value="#38bdf8", key="new_cat_color")
             new_desc = st.text_input("Description (optional)", key="new_cat_desc", placeholder="e.g. Academic advising emails")
             if st.button("Create", key="create_cat_btn"):
                 if new_name and new_name.strip():
                     try:
-                        create_label(new_name, color=new_color, description=new_desc)
+                        _rand_color = random.choice(_NICE_COLORS)
+                        create_label(new_name, color=_rand_color, description=new_desc)
                         st.success(f"Created '{new_name}'")
                         st.rerun()
                     except Exception as e:
@@ -673,26 +685,16 @@ with draft_col:
                             delete_label(slug)
                             st.rerun()
 
-        # ── Learned rules ──
-        st.markdown("---")
-        st.markdown("**Learned rules**")
-        rules = get_all_rules()
-        if not rules:
-            st.markdown("<div class='card-muted'>No rules yet. Override an email's category to start learning.</div>", unsafe_allow_html=True)
-        else:
-            for rule in rules[:15]:
-                r_left, r_right = st.columns([5, 1])
-                with r_left:
-                    st.markdown(
-                        f"<div style='font-size:12px;padding:2px 0;'>"
-                        f"<code>{html.escape(rule['match_type'])}</code>: "
-                        f"<b>{html.escape(rule['match_value'])}</b> → {html.escape(rule['label_slug'])} "
-                        f"<span style='color:#64748b;'>({rule['hits']} hits)</span></div>",
-                        unsafe_allow_html=True,
-                    )
-                with r_right:
-                    if st.button("x", key=f"del_rule_{rule['id']}"):
-                        delete_rule(rule["id"])
+                # Filter button on its own row, right-aligned under the 3 cols
+                _fc1, _fc2 = st.columns([4, 1])
+                with _fc2:
+                    _filter_active = st.session_state.get("_cat_filter") == slug
+                    _filter_label = "Unfilter" if _filter_active else "Filter"
+                    if st.button(_filter_label, key=f"filter_cat_{slug}"):
+                        if _filter_active:
+                            st.session_state.pop("_cat_filter", None)
+                        else:
+                            st.session_state["_cat_filter"] = slug
                         st.rerun()
 
         # ── Re-categorize selected email ──
@@ -708,7 +710,7 @@ with draft_col:
         try:
             _enabled_label_options = [lb["slug"] for lb in get_enabled_labels()]
         except Exception:
-            _enabled_label_options = ["urgent", "important", "normal", "low", "newsletter"]
+            _enabled_label_options = ["urgent", "important", "normal", "informational", "newsletter"]
 
         _sel_email = st.session_state.get("selected_email_obj")
         if not _sel_email:
@@ -751,28 +753,26 @@ with draft_col:
                             break
                     st.rerun()
 
-        # ── Proposals ──
+        # ── Suggested Categories (auto-triggered once) ──
         st.markdown("---")
-        if st.button("Suggest new categories", key="suggest_cats"):
+        # Auto-fetch proposals once when Categories tab opens
+        if "_cat_proposals_loaded" not in st.session_state:
+            st.session_state["_cat_proposals_loaded"] = True
             proposals = propose_categories_from_history(min_sender_count=2)
             if proposals:
                 st.session_state["_cat_proposals"] = proposals
-            else:
-                st.info("Not enough email history to suggest categories yet.")
 
         if st.session_state.get("_cat_proposals"):
+            st.markdown("**Suggested Categories**")
+            # Render each proposal as a self-contained button with the name as label
             for pi, prop in enumerate(st.session_state["_cat_proposals"]):
-                st.markdown(
-                    f"<div style='font-size:12px;padding:2px 0;'>"
-                    f"<b>{html.escape(prop['proposed_name'])}</b> — {html.escape(prop['reason'])}</div>",
-                    unsafe_allow_html=True,
-                )
-                if st.button(f"Create & add rule", key=f"accept_prop_{pi}"):
+                if st.button(prop["proposed_name"], key=f"accept_prop_{pi}", use_container_width=True):
                     try:
-                        new_lb = create_label(prop["proposed_name"])
+                        _rand_color = random.choice(_NICE_COLORS)
+                        new_lb = create_label(prop["proposed_name"], color=_rand_color)
                         from agent.email_memory import upsert_rule
                         upsert_rule(prop["match_type"], prop["match_value"], new_lb["slug"])
-                        st.success(f"Created '{prop['proposed_name']}' with rule")
+                        st.success(f"Created '{prop['proposed_name']}'")
                         # Remove from proposals
                         st.session_state["_cat_proposals"].pop(pi)
                         st.rerun()
@@ -950,7 +950,13 @@ with draft_col:
                                         end_iso=s_end,
                                         add_zoom=zoom_available(),
                                     )
-                                    st.success(f"Event created: {evt.get('summary', 'Meeting')}")
+                                    # Add a todo item for the scheduled meeting
+                                    meeting_summary = evt.get('summary', 'Meeting')
+                                    add_todo_item(
+                                        task=f"Meeting: {meeting_summary} on {slot_label}",
+                                        email_id=email.get("id", ""),
+                                    )
+                                    st.success(f"Event created: {meeting_summary}")
                                     # Clean up scheduling state
                                     st.session_state.pop(f"schedule_pending_{eid}", None)
                                     st.session_state.pop(sched_key, None)

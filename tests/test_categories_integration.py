@@ -169,8 +169,8 @@ class TestLabelCRUD:
 
     def test_update_label_color(self):
         ensure_default_labels()
-        update_label("low", color="#000000")
-        lb = get_label_by_slug("low")
+        update_label("informational", color="#000000")
+        lb = get_label_by_slug("informational")
         assert lb["color"] == "#000000"
 
     def test_update_label_enabled(self):
@@ -192,10 +192,10 @@ class TestLabelCRUD:
 
     def test_get_enabled_labels_excludes_hidden(self):
         ensure_default_labels()
-        update_label("low", enabled=0)
+        update_label("informational", enabled=0)
         enabled = get_enabled_labels()
         slugs = [lb["slug"] for lb in enabled]
-        assert "low" not in slugs
+        assert "informational" not in slugs
         assert "urgent" in slugs
 
 
@@ -218,9 +218,9 @@ class TestLabelMerge:
 
     def test_merge_system_into_system_disables_source(self):
         ensure_default_labels()
-        upsert_rule("sender", "news@example.com", "low")
-        merge_labels("low", "newsletter")
-        lb = get_label_by_slug("low")
+        upsert_rule("sender", "news@example.com", "informational")
+        merge_labels("informational", "newsletter")
+        lb = get_label_by_slug("informational")
         assert lb is not None  # not deleted (system)
         assert lb["enabled"] == 0  # but disabled
 
@@ -316,7 +316,7 @@ class TestRuleMatching:
     def test_keyword_takes_priority_over_domain(self):
         ensure_default_labels()
         upsert_rule("subject_keyword", "hello", "important")
-        upsert_rule("sender_domain", "example.com", "low")
+        upsert_rule("sender_domain", "example.com", "informational")
         assert match_rules_for_email(self._email()) == "important"
 
     def test_sender_takes_priority_over_domain(self):
@@ -332,8 +332,8 @@ class TestRuleMatching:
 
     def test_disabled_label_not_matched(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "low")
-        update_label("low", enabled=0)
+        upsert_rule("sender", "alice@example.com", "informational")
+        update_label("informational", enabled=0)
         assert match_rules_for_email(self._email()) is None
 
 
@@ -501,7 +501,7 @@ class TestEdgeCases:
         ensure_default_labels()
         store_raw_email({"id": "nosender", "thread_id": "t", "subject": "", "sender": "", "date": "", "body": "", "snippet": ""})
         store_processed_email({"id": "nosender", "category": "normal"})
-        record_category_override({"id": "nosender", "sender": "", "subject": ""}, "low")
+        record_category_override({"id": "nosender", "sender": "", "subject": ""}, "informational")
         # No rule should be created (no meaningful keywords)
         assert len(get_all_rules()) == 0
 

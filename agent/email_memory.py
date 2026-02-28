@@ -568,13 +568,13 @@ def search_emails_for_entity(entity: str, limit: int = 5) -> List[dict]:
 # ─── Custom category labels & rules (Phase 6) ──────────────────────────────
 
 # Default system categories that are always available alongside user labels
-SYSTEM_CATEGORIES = ["urgent", "important", "normal", "low", "newsletter"]
+SYSTEM_CATEGORIES = ["urgent", "important", "normal", "informational", "newsletter"]
 
 DEFAULT_LABEL_COLORS = {
     "urgent": "#ef4444",
     "important": "#f59e0b",
     "normal": "#94a3b8",
-    "low": "#64748b",
+    "informational": "#64748b",
     "newsletter": "#8b5cf6",
 }
 
@@ -587,10 +587,27 @@ def _slugify(text: str) -> str:
 
 
 def ensure_default_labels() -> None:
-    """Seed the category_labels table with the 5 system categories if empty."""
+    """Seed the category_labels table with the 5 system categories if empty.
+
+    Also migrates the legacy 'low' category to 'informational' if present.
+    """
     init_db()
     with get_connection() as conn:
         cur = conn.cursor()
+
+        # Migrate legacy "low" → "informational"
+        cur.execute("SELECT slug FROM category_labels WHERE slug = 'low'")
+        if cur.fetchone():
+            cur.execute(
+                "UPDATE category_labels SET slug = 'informational', display_name = 'Informational', "
+                "description = 'Informational only, no action needed' WHERE slug = 'low'"
+            )
+            # Update any rules pointing to the old slug
+            cur.execute("UPDATE category_rules SET label_slug = 'informational' WHERE label_slug = 'low'")
+            # Update processed emails
+            cur.execute("UPDATE email_processed SET category = 'informational' WHERE category = 'low'")
+            conn.commit()
+
         cur.execute("SELECT COUNT(*) FROM category_labels")
         if cur.fetchone()[0] > 0:
             return
@@ -598,7 +615,7 @@ def ensure_default_labels() -> None:
             ("urgent", "Urgent", DEFAULT_LABEL_COLORS["urgent"], "Must act today", 1, 0),
             ("important", "Important", DEFAULT_LABEL_COLORS["important"], "Act within 24-48h", 1, 1),
             ("normal", "Normal", DEFAULT_LABEL_COLORS["normal"], "Routine, default", 1, 2),
-            ("low", "Low", DEFAULT_LABEL_COLORS["low"], "Informational only", 1, 3),
+            ("informational", "Informational", DEFAULT_LABEL_COLORS["informational"], "Informational only, no action needed", 1, 3),
             ("newsletter", "Newsletter", DEFAULT_LABEL_COLORS["newsletter"], "Marketing & newsletters", 1, 4),
         ]
         cur.executemany(
