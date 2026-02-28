@@ -240,7 +240,7 @@ def postprocess_categories_node(state: EmailAgentState) -> dict:
         if not needs_action:
             continue
         cat = (e.get("category") or "normal").lower()
-        if cat not in ["low", "newsletter"]:
+        if cat not in ["informational", "newsletter"]:
             continue
         text = " ".join([
             str(e.get("subject", "")).lower(),

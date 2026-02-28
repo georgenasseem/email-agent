@@ -182,14 +182,44 @@ def draft_reply(
         )
 
         roles = analyze_roles(email)
+
+        # Extract the OTHER person's display name (not the user's own name)
+        _other_sender = email.get('sender', '') or ''
+        _other_name_match = re.match(r'^([^<]+)', _other_sender)
+        _other_display_name = ''
+        if _other_name_match:
+            _other_display_name = _other_name_match.group(1).strip().strip('"').strip("'")
+        if not _other_display_name or '@' in _other_display_name:
+            _other_display_name = _other_sender.split('@')[0] if '@' in _other_sender else 'there'
+        # Extract first name only for greeting
+        _other_first_name = _other_display_name.split()[0] if _other_display_name else 'there'
+
+        # Get the user's own name to avoid self-addressing
+        _user_name = ''
+        try:
+            _prof = load_profile()
+            _user_name = _prof.get('display_name', '') or ''
+            if not _user_name:
+                _user_email = _prof.get('email', '')
+                if _user_email:
+                    _user_name = _user_email.split('@')[0]
+        except Exception:
+            pass
+
         reply_plan = plan_reply(email, decision=decision)
 
         system = f"""You are a professional email drafter. You MUST output a complete email reply with three parts: (1) GREETING, (2) BODY, (3) CLOSING.
 
 MANDATORY STRUCTURE - your output MUST include all three:
-1. GREETING: Start with a greeting (e.g. Hi [Name], Dear [Name], Hello [Name]). Use the other person's name when known.
+1. GREETING: Start with a greeting (e.g. Hi {_other_first_name}, Dear {_other_first_name}, Hello {_other_first_name}). Address THE SENDER, NOT yourself.
 2. BODY: 2-4 sentences addressing the email content. Incorporate the user's intent: {decision if decision else "General response"} and the reply plan below.
 {closing_instruction}
+
+CRITICAL IDENTITY RULES:
+- You are writing FROM: {roles.get('user_email') or 'the user'}{f' ({_user_name})' if _user_name else ''}.
+- You are writing TO: {roles.get('other_party_email') or 'the sender'} (name: {_other_display_name}).
+- The greeting MUST address {_other_first_name} (the sender), NEVER address {_user_name or 'yourself'}.
+- If the sender name equals the user name, use a generic greeting like "Hi" instead.
 
 STYLE: {style}
 
@@ -197,7 +227,6 @@ RULES:
 - Output ONLY the email body text. No subject line. No markdown.
 - Never output just "Thank you for your message" - always include greeting, substantive body, and closing.
 - Sound natural. Match the tone of the original email when appropriate.
-- You are writing FROM the user ({roles.get('user_email') or 'you'}) TO the other party ({roles.get('other_party_email') or 'them'}). Never flip this perspective.
 
 REPLY PLAN (authoritative):
 - Goal: {reply_plan.get('goal', '')}
@@ -208,7 +237,6 @@ REPLY PLAN (authoritative):
         if decision:
             decision_text = f"\n\nUser chose this reply intent: {decision}. The body must reflect this choice."
 
-        sender_name = email.get('sender', 'sender').split('@')[0] if email.get('sender') else 'there'
         subject_text = email.get('subject', '')[:100]
         body_text = (email.get('clean_body') or email.get('body', '') or email.get('snippet', ''))[:600]
         thread_ctx = (email.get('thread_context') or '')[:400]
@@ -217,6 +245,25 @@ REPLY PLAN (authoritative):
         memory_ctx = ""
         try:
             memory_ctx = build_memory_context(email, max_linked=5)[:500]
+        except Exception:
+            pass
+
+        # Build profile context from profile.json
+        profile_ctx = ""
+        try:
+            _full_prof = load_profile()
+            _prof_parts = []
+            if _full_prof.get('organization'):
+                _prof_parts.append(f"Organization: {_full_prof['organization']}")
+            if _full_prof.get('role'):
+                _prof_parts.append(f"Role: {_full_prof['role']}")
+            comm_prefs = _full_prof.get('communication_preferences', {})
+            if comm_prefs.get('formality_level'):
+                _prof_parts.append(f"Formality: {comm_prefs['formality_level']}")
+            if comm_prefs.get('response_length'):
+                _prof_parts.append(f"Length preference: {comm_prefs['response_length']}")
+            if _prof_parts:
+                profile_ctx = "User profile: " + ", ".join(_prof_parts)
         except Exception:
             pass
 
@@ -234,7 +281,7 @@ REPLY PLAN (authoritative):
         except Exception:
             pass
 
-        prompt = f"""Reply to this email. Sender: {sender_name}. Subject: {subject_text}
+        prompt = f"""Reply to this email. Sender: {_other_display_name}. Subject: {subject_text}
 
 Email content:
 {body_text}
@@ -245,6 +292,8 @@ Thread context (recent messages in this conversation, if any):
 {(email.get('enriched_context') or '')[:500]}
 
 {memory_ctx}
+
+{profile_ctx}
 
 {sender_history}{decision_text}
 

@@ -23,7 +23,7 @@ from agent.langgraph_pipeline import run_email_pipeline, load_from_memory
 from agent.email_memory import (
     get_email_count,
     add_todo_item, get_todo_items, remove_todo_item,
-    get_all_labels, get_enabled_labels, create_label, update_label, delete_label,
+    get_all_labels, get_enabled_labels, create_label, delete_label,
     record_category_override, propose_categories_from_history,
     ensure_default_labels,
 )
@@ -398,6 +398,17 @@ st.markdown(
         justify-content: flex-end;
         gap: 0;
     }}
+
+    /* Strip ALL highlight / selection effects from email body iframe content */
+    iframe {{
+        border: none !important;
+    }}
+    ::selection {{
+        background: transparent !important;
+    }}
+    ::-moz-selection {{
+        background: transparent !important;
+    }}
 </style>
 """,
     unsafe_allow_html=True,
@@ -417,7 +428,7 @@ if not CREDENTIALS_FILE.exists():
 # Defaults for model (used before widgets initialize)
 llm_options = ["Groq (hosted)", "Qwen 2.5 3B (local)", "Qwen 2.5 7B (local)"]
 default_llm_display = st.session_state.get("llm_backend", "Qwen 2.5 3B (local)")
-MIN_FETCH = 5   # minimum emails to fetch on first load
+MIN_FETCH = 20  # minimum emails to fetch on first load
 MAX_FETCH = 20  # fetch more when catching up on new emails
 
 # Main header row: logo | model | fetch | sign-out
@@ -599,7 +610,10 @@ filtered = emails
 # Apply category filter if active
 _active_cat_filter = st.session_state.get("_cat_filter")
 if _active_cat_filter:
-    filtered = [e for e in filtered if e.get("category", "normal") == _active_cat_filter]
+    if _active_cat_filter == "__needs_action__":
+        filtered = [e for e in filtered if e.get("needs_action")]
+    else:
+        filtered = [e for e in filtered if e.get("category", "normal") == _active_cat_filter]
 
 # Always sort by newest first
 filtered.sort(key=lambda x: x.get("internal_date", 0), reverse=True)
@@ -653,6 +667,28 @@ with draft_col:
                 else:
                     st.warning("Enter a name")
 
+        # ── "Needs action" pseudo-filter ──
+        _na_active = st.session_state.get("_cat_filter") == "__needs_action__"
+        _na_c1, _na_c2, _na_c3 = st.columns([3, 1, 1])
+        with _na_c1:
+            st.markdown(
+                "<div style='font-size:13px;padding:4px 0;'>"
+                "<span style='display:inline-block;width:10px;height:10px;border-radius:50%;"
+                f"background:{accent_orange};margin-right:6px;vertical-align:middle;'></span>"
+                "<b>Needs Action</b></div>",
+                unsafe_allow_html=True,
+            )
+        with _na_c3:
+            _na_label = "Unfilter" if _na_active else "Filter"
+            if st.button(_na_label, key="filter_cat___needs_action__"):
+                if _na_active:
+                    st.session_state.pop("_cat_filter", None)
+                else:
+                    st.session_state["_cat_filter"] = "__needs_action__"
+                st.rerun()
+
+        st.markdown("---")
+
         # ── Existing labels ──
         if not all_labels:
             st.markdown("<div class='card-muted'>No categories yet.</div>", unsafe_allow_html=True)
@@ -662,32 +698,15 @@ with draft_col:
                 c_left, c_mid, c_right = st.columns([3, 1, 1])
                 with c_left:
                     color_dot = f"<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{lb['color']};margin-right:6px;vertical-align:middle;'></span>"
-                    enabled_txt = "" if lb["enabled"] else " <span style='color:#64748b;font-size:11px;'>(hidden)</span>"
                     st.markdown(
-                        f"<div style='font-size:13px;padding:4px 0;'>{color_dot}<b>{html.escape(lb['display_name'])}</b>{enabled_txt}</div>",
+                        f"<div style='font-size:13px;padding:4px 0;'>{color_dot}<b>{html.escape(lb['display_name'])}</b></div>",
                         unsafe_allow_html=True,
                     )
-                    if lb.get("description"):
-                        st.markdown(f"<div class='card-muted'>{html.escape(lb['description'])}</div>", unsafe_allow_html=True)
                 with c_mid:
-                    if lb["enabled"]:
-                        if st.button("Hide", key=f"hide_cat_{slug}"):
-                            update_label(slug, enabled=0)
-                            st.rerun()
-                    else:
-                        if st.button("Show", key=f"show_cat_{slug}"):
-                            update_label(slug, enabled=1)
-                            st.rerun()
+                    if st.button("Del", key=f"del_cat_{slug}"):
+                        delete_label(slug)
+                        st.rerun()
                 with c_right:
-                    from agent.email_memory import SYSTEM_CATEGORIES
-                    if slug not in SYSTEM_CATEGORIES:
-                        if st.button("Del", key=f"del_cat_{slug}"):
-                            delete_label(slug)
-                            st.rerun()
-
-                # Filter button on its own row, right-aligned under the 3 cols
-                _fc1, _fc2 = st.columns([4, 1])
-                with _fc2:
                     _filter_active = st.session_state.get("_cat_filter") == slug
                     _filter_label = "Unfilter" if _filter_active else "Filter"
                     if st.button(_filter_label, key=f"filter_cat_{slug}"):
@@ -753,27 +772,31 @@ with draft_col:
                             break
                     st.rerun()
 
-        # ── Suggested Categories (auto-triggered once) ──
+        # ── Suggested Categories (auto-triggered on every tab open) ──
         st.markdown("---")
-        # Auto-fetch proposals once when Categories tab opens
-        if "_cat_proposals_loaded" not in st.session_state:
-            st.session_state["_cat_proposals_loaded"] = True
-            proposals = propose_categories_from_history(min_sender_count=2)
-            if proposals:
-                st.session_state["_cat_proposals"] = proposals
+        # Fetch proposals each time the Categories tab is shown
+        # (cheap DB query, always up-to-date)
+        _proposals = propose_categories_from_history(min_sender_count=2)
+        if _proposals:
+            st.session_state["_cat_proposals"] = _proposals
+        else:
+            st.session_state.pop("_cat_proposals", None)
 
         if st.session_state.get("_cat_proposals"):
             st.markdown("**Suggested Categories**")
-            # Render each proposal as a self-contained button with the name as label
             for pi, prop in enumerate(st.session_state["_cat_proposals"]):
                 if st.button(prop["proposed_name"], key=f"accept_prop_{pi}", use_container_width=True):
                     try:
-                        _rand_color = random.choice(_NICE_COLORS)
-                        new_lb = create_label(prop["proposed_name"], color=_rand_color)
-                        from agent.email_memory import upsert_rule
+                        from agent.email_memory import get_label_by_slug, _slugify, upsert_rule
+                        _prop_slug = _slugify(prop["proposed_name"])
+                        existing = get_label_by_slug(_prop_slug)
+                        if existing:
+                            new_lb = existing
+                        else:
+                            _rand_color = random.choice(_NICE_COLORS)
+                            new_lb = create_label(prop["proposed_name"], color=_rand_color)
                         upsert_rule(prop["match_type"], prop["match_value"], new_lb["slug"])
                         st.success(f"Created '{prop['proposed_name']}'")
-                        # Remove from proposals
                         st.session_state["_cat_proposals"].pop(pi)
                         st.rerun()
                     except Exception as e:
@@ -830,7 +853,11 @@ with draft_col:
                     '<style>body{background:#020617;margin:0;}'
                     'a{color:#38bdf8 !important;}'
                     'img{max-width:100%;height:auto;}'
-                    '*{color:#e5e7eb !important;}</style>'
+                    '*{color:#e5e7eb !important;background-color:transparent !important;}'
+                    '::selection{background:transparent !important;}'
+                    '::-moz-selection{background:transparent !important;}'
+                    'mark,span[style*=\"background\"],span[style*=\"highlight\"]{background:none !important;}'
+                    '</style>'
                     + body_html + '</div>'
                 )
                 components.html(wrapped, height=400, scrolling=True)
@@ -859,12 +886,7 @@ with draft_col:
                 if pre and isinstance(pre, list) and len(pre) > 0:
                     options = pre
                 else:
-                    with st.spinner("Fetching quick actions..."):
-                        try:
-                            options_result = suggest_decision(email)
-                            options = options_result.get("decision_options") or []
-                        except Exception:
-                            options = []
+                    options = []
                 st.session_state[options_key] = options
 
             if options:

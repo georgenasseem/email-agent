@@ -185,10 +185,10 @@ class TestLabelCRUD:
         delete_label("temp")
         assert get_label_by_slug("temp") is None
 
-    def test_delete_system_label_raises(self):
+    def test_delete_system_label_allowed(self):
         ensure_default_labels()
-        with pytest.raises(ValueError):
-            delete_label("urgent")
+        delete_label("urgent")
+        assert get_label_by_slug("urgent") is None
 
     def test_get_enabled_labels_excludes_hidden(self):
         ensure_default_labels()
@@ -505,12 +505,13 @@ class TestEdgeCases:
         # No rule should be created (no meaningful keywords)
         assert len(get_all_rules()) == 0
 
-    def test_duplicate_slug_insert(self):
-        """Creating a label with an existing slug should fail with IntegrityError."""
+    def test_duplicate_slug_returns_existing(self):
+        """Creating a label with an existing slug should return the existing one."""
         ensure_default_labels()
-        create_label("Finance")
-        with pytest.raises(Exception):
-            create_label("Finance")
+        lb1 = create_label("Finance")
+        lb2 = create_label("Finance")
+        assert lb1["slug"] == lb2["slug"]
+        assert lb1["id"] == lb2["id"]
 
 
 # ── Cleanup temp DB ────────────────────────────────────────────────────────

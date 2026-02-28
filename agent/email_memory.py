@@ -661,12 +661,20 @@ def get_label_by_slug(slug: str) -> Optional[dict]:
 
 
 def create_label(display_name: str, color: str = "#94a3b8", description: str = "") -> dict:
-    """Create a new custom category label. Returns the label dict."""
+    """Create a new custom category label. Returns the label dict.
+
+    If a label with the same slug already exists, returns the existing one
+    instead of raising an error.
+    """
     init_db()
     ensure_default_labels()
     slug = _slugify(display_name)
     if not slug:
         raise ValueError("Label name cannot be empty")
+    # Check for existing label with same slug
+    existing = get_label_by_slug(slug)
+    if existing:
+        return existing
     with get_connection() as conn:
         cur = conn.cursor()
         # Get next position
@@ -708,12 +716,11 @@ def update_label(slug: str, display_name: str = None, color: str = None, descrip
 
 
 def delete_label(slug: str) -> None:
-    """Delete a custom label. System categories cannot be deleted."""
-    if slug in SYSTEM_CATEGORIES:
-        raise ValueError(f"Cannot delete system category '{slug}'")
+    """Delete a category label. Also cleans up any rules pointing to it."""
     init_db()
     with get_connection() as conn:
         cur = conn.cursor()
+        cur.execute("DELETE FROM category_rules WHERE label_slug = ?", (slug,))
         cur.execute("DELETE FROM category_labels WHERE slug = ?", (slug,))
         conn.commit()
 
