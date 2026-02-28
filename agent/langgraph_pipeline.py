@@ -8,6 +8,7 @@ Key behaviors:
 - Cross-email links are built after every processing run.
 """
 import re
+import time
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
@@ -28,6 +29,7 @@ from agent.summarizer import summarize_batch
 from agent.categorizer import categorize_emails
 from agent.urgent_detector import flag_urgent_emails
 from agent.decision_suggester import suggest_decision
+from agent.quick_actions_graph import suggest_quick_actions
 from agent.delegation import decide_delegation
 from agent.context_enrichment import enrich_batch
 
@@ -43,6 +45,11 @@ class EmailAgentState(TypedDict, total=False):
     error: str
     # Internal flags
     retrain: bool
+
+
+# Style learning cache: timestamp of last learn
+_style_last_learned: float = 0.0
+_STYLE_CACHE_SECONDS = 24 * 3600  # 24 hours
 
 
 # ─── Loading from persistent storage (instant) ─────────────────────────────
@@ -79,14 +86,6 @@ def fetch_inbox_node(state: EmailAgentState) -> dict:
 
     # Persist all raw emails immediately
     store_raw_emails(all_fetched)
-
-    # Build cross-email links EARLY so build_memory_context() returns
-    # useful data for downstream nodes (summarize, categorize, decide).
-    try:
-        all_raw = load_all_raw_emails()
-        build_email_links(all_raw)
-    except Exception:
-        pass
 
     # Normal mode: only process emails not already in email_processed
     already_processed = get_processed_email_ids()
@@ -188,8 +187,14 @@ def enrich_context_node(state: EmailAgentState) -> dict:
 
 
 def learn_style_node(state: EmailAgentState) -> dict:
-    """Learn and persist user writing style."""
+    """Learn and persist user writing style (cached for 24h)."""
+    global _style_last_learned
+    now = time.time()
+    # Skip re-learning if done recently (unless retrain mode)
+    if not state.get("retrain") and (now - _style_last_learned) < _STYLE_CACHE_SECONDS:
+        return {"style_notes": load_persisted_style()}
     style = learn_and_persist_style(max_samples=4)
+    _style_last_learned = now
     return {"style_notes": style or load_persisted_style()}
 
 
@@ -221,10 +226,17 @@ def flag_urgent_node(state: EmailAgentState) -> dict:
 
 
 def postprocess_categories_node(state: EmailAgentState) -> dict:
-    """Deterministically reconcile category with needs_action/urgency signals."""
+    """Deterministically reconcile category with needs_action/urgency signals.\n\n    Respects user-disabled categories — will not promote to a disabled category.\n    """
     emails = state.get("emails") or []
     if not emails:
         return {}
+
+    # Check which categories are actually enabled
+    try:
+        from agent.email_memory import get_enabled_labels
+        _enabled = {lb["slug"] for lb in get_enabled_labels()}
+    except Exception:
+        _enabled = {"urgent", "important", "normal", "informational", "newsletter"}
 
     security_keywords = [
         "security alert", "verify your account", "password reset",
@@ -248,9 +260,14 @@ def postprocess_categories_node(state: EmailAgentState) -> dict:
             str(e.get("snippet", "")).lower(),
         ])
         if any(k in text for k in security_keywords + hard_deadline_keywords):
-            e["category"] = "urgent"
+            # Only promote to "urgent" if it's enabled, otherwise "important"
+            if "urgent" in _enabled:
+                e["category"] = "urgent"
+            elif "important" in _enabled:
+                e["category"] = "important"
         else:
-            e["category"] = "important"
+            if "important" in _enabled:
+                e["category"] = "important"
 
     return {"emails": emails}
 
@@ -276,14 +293,13 @@ def log_memory_node(state: EmailAgentState) -> dict:
 
 
 def suggest_decision_node(state: EmailAgentState) -> dict:
-    """Add decision options to each email."""
+    """Add decision options to each email using the dedicated quick-actions graph."""
     emails = state.get("emails") or []
     if not emails:
         return {}
     for e in emails:
         try:
-            dec = suggest_decision(e)
-            options = dec.get("decision_options") or []
+            options = suggest_quick_actions(e)
             if options:
                 e["decision_options"] = options
         except Exception:
@@ -326,10 +342,10 @@ def persist_results_node(state: EmailAgentState) -> dict:
     return {}
 
 
-# ─── Graph construction ─────────────────────────────────────────────────────
+# ─── Graph construction (singleton) ──────────────────────────────────────────
 
 
-def build_email_graph():
+def _build_email_graph():
     """Build the straight-line Process Inbox graph with persistence."""
     graph = StateGraph(EmailAgentState)
 
@@ -365,6 +381,10 @@ def build_email_graph():
     return graph.compile()
 
 
+# Module-level singleton: built once, reused for every pipeline run
+_EMAIL_GRAPH = _build_email_graph()
+
+
 def run_email_pipeline(
     query: str = "in:inbox",
     max_emails: int = 5,
@@ -381,7 +401,7 @@ def run_email_pipeline(
     if retrain:
         wipe_processed_data()
 
-    graph = build_email_graph()
+    graph = _EMAIL_GRAPH
     initial: EmailAgentState = {
         "query": query,
         "max_emails": max_emails,

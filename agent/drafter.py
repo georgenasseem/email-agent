@@ -206,7 +206,12 @@ def draft_reply(
         except Exception:
             pass
 
-        reply_plan = plan_reply(email, decision=decision)
+        reply_plan = plan_reply(email, decision=decision) if len((decision or "").split()) >= 5 else {
+            "goal": f"Respond to the email about '{email.get('subject', '')[:80]}' with intent: {decision or 'General response'}",
+            "key_points": ["Address the main request", "Indicate next steps if any"],
+            "tone": "neutral",
+            "risks": [],
+        }
 
         system = f"""You are a professional email drafter. You MUST output a complete email reply with three parts: (1) GREETING, (2) BODY, (3) CLOSING.
 

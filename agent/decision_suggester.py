@@ -26,13 +26,15 @@ Each action MUST start with exactly one of these prefixes:
 - "Reply: " — a short description of a reply to send TO THE SENDER (e.g. "Reply: Accept the invitation", "Reply: Ask for more details")
 - "Todo: " — a short task the user should do based on this email (e.g. "Todo: Submit hackathon form by Friday", "Todo: Review attached document")
 - "Schedule: " — for meeting/scheduling requests. Creates a calendar event with free slot lookup. (e.g. "Schedule: meeting with John", "Schedule: project review session")
+- "Archive: " — dismiss/archive the email when no action is needed (e.g. "Archive: No action needed", "Archive: FYI only")
 
 CRITICAL RULES:
 - Reply actions are messages TO SEND to the other person. They must make sense as something you'd say TO THEM.
 - NEVER suggest replies that read like personal notes (e.g. "Reply: Check the update", "Reply: Read the document", "Reply: Review the details"). These should be Todo items instead.
 - Replies must be conversational actions: accepting, declining, requesting info, confirming, thanking, asking questions, etc.
 - Only suggest Reply actions if the email actually warrants a reply. Newsletters, automated notifications, marketing emails, FYI-only emails, and system confirmations do NOT need replies.
-- If the email is purely informational (a notification, receipt, or announcement), suggest ONLY Todo actions or no actions at all.
+- If the email is purely informational (a notification, receipt, or announcement), suggest ONLY Todo or Archive actions.
+- For newsletters, marketing, and no-reply senders, include an "Archive:" action.
 - If the email mentions a meeting, call, appointment, or catch-up, ALWAYS include one "Schedule:" action.
 - Schedule actions describe WHAT to schedule, NEVER specific dates or times. The scheduling system will check the user's calendar for availability. Examples:
   GOOD: "Schedule: meeting with Dr. Smith", "Schedule: workshop follow-up call"
@@ -45,7 +47,7 @@ CRITICAL RULES:
 Output ONLY a JSON array of strings. No other text."""
 
     subject = email.get("subject", "")[:120]
-    body_text = (email.get("clean_body") or email.get("body") or email.get("snippet") or "")[:600]
+    body_text = (email.get("clean_body") or email.get("body") or email.get("snippet") or "")[:1200]
     thread_ctx = (email.get("thread_context") or "")[:350]
     related_ctx = (email.get("related_context") or "")[:500]
     category = email.get("category", "normal")
@@ -117,7 +119,7 @@ Suggest quick actions (ONLY JSON ARRAY of "Reply: ..." and/or "Todo: ..." string
                 if not s or key in seen:
                     continue
                 # Ensure proper prefix
-                if not (s.startswith("Reply:") or s.startswith("Todo:") or s.startswith("Schedule:")):
+                if not (s.startswith("Reply:") or s.startswith("Todo:") or s.startswith("Schedule:") or s.startswith("Archive:")):
                     continue
                 seen.add(key)
                 cleaned.append(s)
@@ -125,9 +127,9 @@ Suggest quick actions (ONLY JSON ARRAY of "Reply: ..." and/or "Todo: ..." string
                 return {"decision_options": cleaned[:5]}
     except json.JSONDecodeError as e:
         logger.warning("JSON parse error in decision_suggester: %s (raw: %s)", e, (raw or "")[:500])
-        raise ValueError(f"Decision suggester failed: could not parse JSON. Raw: {(raw or '')[:500]}") from e
+        return {"decision_options": []}
     except Exception as e:
         logger.warning("Error in decision_suggester: %s", e)
-        raise
+        return {"decision_options": []}
 
-    raise ValueError(f"Decision suggester failed: LLM returned invalid format. Raw: {(raw or '')[:500]}")
+    return {"decision_options": []}

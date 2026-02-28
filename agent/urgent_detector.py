@@ -15,7 +15,7 @@ def flag_urgent_emails(emails: list[dict]) -> list[dict]:
     for e in emails:
         # Combine all text fields for keyword matching
         subject = e.get('subject', '').lower()
-        body = e.get('body', '').lower()
+        body = (e.get('clean_body') or e.get('body') or '').lower()
         snippet = e.get('snippet', '').lower()
         full_text = f"{subject} {body} {snippet}"
         
@@ -24,7 +24,8 @@ def flag_urgent_emails(emails: list[dict]) -> list[dict]:
         # Define trigger categories for different types of urgency
         urgent_triggers = [
             "deadline", "by end of day", "by eod", "by 5pm", "by 6pm",
-            "today", "tonight", "asap", "urgent", "immediately", "emergency",
+            "due today", "by today", "needed today", "submit today",
+            "tonight", "asap", "urgent", "immediately", "emergency",
             "time-sensitive", "do not delay"
         ]
         
@@ -45,9 +46,10 @@ def flag_urgent_emails(emails: list[dict]) -> list[dict]:
         ]
         
         informational_triggers = [
-            "fyi", "for your information", "just letting you know", "update",
+            "fyi", "for your information", "just letting you know",
             "announcement", "newsletter", "summary", "report", "attached",
-            "here is", "here are", "sharing", "resources", "materials"
+            "here is", "here are", "sharing", "resources", "materials",
+            "status update", "weekly update", "monthly update"
         ]
         
         # Check which triggers are present

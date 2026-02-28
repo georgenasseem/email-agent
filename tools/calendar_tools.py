@@ -1,18 +1,25 @@
 """Google Calendar API tools for listing events, finding free slots, and creating events."""
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import logging
 
 from googleapiclient.discovery import build
+from zoneinfo import ZoneInfo
 
 from tools.google_auth import get_google_credentials
 
+logger = logging.getLogger(__name__)
 
-# ─── Working-hours configuration (override via env or profile later) ────────
+# ─── Working-hours configuration ───────────────────────────────────────────
 WORK_START_HOUR = 9    # 09:00
 WORK_END_HOUR = 17     # 17:00
 LUNCH_START_HOUR = 12  # 12:00
 LUNCH_END_HOUR = 13    # 13:00
 SLOT_GAP_MINUTES = 15  # gap between consecutive proposed slots
+
+_user_timezone_cache: Optional[str] = None
+
+_calendar_service_cache = None
 
 
 def _parse_rfc3339(s: str) -> datetime:
@@ -35,14 +42,42 @@ def _to_rfc3339(dt: datetime) -> str:
 
 
 def get_calendar_service():
-    """Authenticate and return Google Calendar API service."""
+    """Authenticate and return Google Calendar API service (cached per process)."""
+    global _calendar_service_cache
+    if _calendar_service_cache is not None:
+        return _calendar_service_cache
     creds = get_google_credentials()
-    return build("calendar", "v3", credentials=creds)
+    _calendar_service_cache = build("calendar", "v3", credentials=creds)
+    return _calendar_service_cache
+
+
+def get_user_timezone() -> ZoneInfo:
+    """Fetch the user's timezone from Google Calendar settings (cached).
+
+    Falls back to America/New_York if the API call fails.
+    """
+    global _user_timezone_cache
+    if _user_timezone_cache is not None:
+        return ZoneInfo(_user_timezone_cache)
+    try:
+        service = get_calendar_service()
+        setting = service.settings().get(setting="timezone").execute()
+        tz_str = setting.get("value", "America/New_York")
+        _user_timezone_cache = tz_str
+        return ZoneInfo(tz_str)
+    except Exception:
+        logger.warning("Could not fetch user timezone, defaulting to America/New_York")
+        _user_timezone_cache = "America/New_York"
+        return ZoneInfo("America/New_York")
 
 
 def _is_within_working_hours(dt: datetime, duration_delta: timedelta) -> bool:
     """Check if a slot starting at `dt` and lasting `duration_delta` falls
-    within working hours and avoids the lunch break."""
+    within working hours, avoids the lunch break, and is not on a weekend."""
+    # Weekend check (Saturday=5, Sunday=6)
+    if dt.weekday() >= 5:
+        return False
+
     start_h = dt.hour + dt.minute / 60
     end_dt = dt + duration_delta
     end_h = end_dt.hour + end_dt.minute / 60
@@ -109,13 +144,16 @@ def find_free_slots(
     cursor = time_min.replace(tzinfo=tz) if time_min.tzinfo is None else time_min
 
     def _try_add_slots(from_dt: datetime, until_dt: datetime):
-        """Generate slots in a free gap, respecting working hours."""
+        """Generate slots in a free gap, respecting working hours and weekends."""
         nonlocal cursor
         c = from_dt
         while c + duration_delta <= until_dt:
             if respect_working_hours and not _is_within_working_hours(c, duration_delta):
-                # Skip to next valid start: either after lunch or next morning
-                if c.hour < WORK_START_HOUR:
+                # Skip weekends
+                if c.weekday() >= 5:
+                    days_until_monday = 7 - c.weekday()
+                    c = (c + timedelta(days=days_until_monday)).replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
+                elif c.hour < WORK_START_HOUR:
                     c = c.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
                 elif c.hour < LUNCH_END_HOUR and c.hour >= LUNCH_START_HOUR:
                     c = c.replace(hour=LUNCH_END_HOUR, minute=0, second=0, microsecond=0)
@@ -202,8 +240,8 @@ def create_event(
         end = end.replace(tzinfo=timezone.utc)
     body = {
         "summary": summary,
-        "start": {"dateTime": _to_rfc3339(start), "timeZone": "UTC"},
-        "end": {"dateTime": _to_rfc3339(end), "timeZone": "UTC"},
+        "start": {"dateTime": _to_rfc3339(start), "timeZone": _user_timezone_cache or "America/New_York"},
+        "end": {"dateTime": _to_rfc3339(end), "timeZone": _user_timezone_cache or "America/New_York"},
     }
     if description:
         body["description"] = description

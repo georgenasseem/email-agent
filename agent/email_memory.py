@@ -12,6 +12,13 @@ from typing import List, Optional, Set
 
 from agent.memory_store import get_connection, init_db, get_memory_entries
 
+# ─── Shared stop words (used by subject tokenizers & memory matching) ──────
+STOP_WORDS = frozenset({
+    "re", "fwd", "fw", "the", "and", "or", "of", "in", "on", "for", "to",
+    "is", "a", "an", "your", "this", "that", "with", "from", "are", "was",
+    "has", "have", "we", "you", "our", "can", "will", "not", "been", "but",
+})
+
 
 # ─── Raw email storage ──────────────────────────────────────────────────────
 
@@ -56,9 +63,44 @@ def store_raw_email(email: dict) -> None:
 
 
 def store_raw_emails(emails: List[dict]) -> None:
-    """Persist a batch of raw emails."""
-    for e in emails:
-        store_raw_email(e)
+    """Persist a batch of raw emails in a single transaction."""
+    if not emails:
+        return
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            INSERT INTO emails (gmail_id, thread_id, subject, sender, date, internal_date, body, clean_body, body_html, snippet)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(gmail_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                subject   = excluded.subject,
+                sender    = excluded.sender,
+                date      = excluded.date,
+                internal_date = excluded.internal_date,
+                body      = excluded.body,
+                clean_body = excluded.clean_body,
+                body_html = excluded.body_html,
+                snippet   = excluded.snippet
+            """,
+            [
+                (
+                    e.get("id"),
+                    e.get("thread_id", ""),
+                    e.get("subject", ""),
+                    e.get("sender", ""),
+                    e.get("date", ""),
+                    e.get("internal_date", 0),
+                    e.get("body", ""),
+                    e.get("clean_body", ""),
+                    e.get("body_html", ""),
+                    e.get("snippet", ""),
+                )
+                for e in emails if e.get("id")
+            ],
+        )
+        conn.commit()
 
 
 def get_stored_email_ids() -> Set[str]:
@@ -130,9 +172,50 @@ def store_processed_email(email: dict) -> None:
 
 
 def store_processed_emails(emails: List[dict]) -> None:
-    """Persist processed fields for a batch of emails."""
+    """Persist processed fields for a batch of emails in a single transaction."""
+    if not emails:
+        return
+    init_db()
+    rows = []
     for e in emails:
-        store_processed_email(e)
+        gid = e.get("id")
+        if not gid:
+            continue
+        options = e.get("decision_options")
+        options_json = json.dumps(options) if options else None
+        rows.append((
+            gid,
+            e.get("summary", ""),
+            e.get("category", "normal"),
+            1 if e.get("needs_action") else 0,
+            options_json,
+            e.get("thread_context", ""),
+            e.get("related_context", ""),
+            e.get("enriched_context", ""),
+            e.get("delegate_to", ""),
+        ))
+    if not rows:
+        return
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.executemany(
+            """
+            INSERT INTO email_processed (gmail_id, summary, category, needs_action, decision_options_json, thread_context, related_context, enriched_context, delegate_to)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(gmail_id) DO UPDATE SET
+                summary              = excluded.summary,
+                category             = excluded.category,
+                needs_action         = excluded.needs_action,
+                decision_options_json = excluded.decision_options_json,
+                thread_context       = excluded.thread_context,
+                related_context      = excluded.related_context,
+                enriched_context     = excluded.enriched_context,
+                delegate_to          = excluded.delegate_to,
+                processed_at         = CURRENT_TIMESTAMP
+            """,
+            rows,
+        )
+        conn.commit()
 
 
 def get_processed_email_ids() -> Set[str]:
@@ -161,6 +244,7 @@ def load_all_processed_emails() -> List[dict]:
                 p.thread_context, p.related_context, p.enriched_context, p.delegate_to
             FROM emails e
             LEFT JOIN email_processed p ON e.gmail_id = p.gmail_id
+            WHERE COALESCE(p.archived, 0) = 0
             ORDER BY e.internal_date DESC
             """
         )
@@ -209,8 +293,7 @@ def _subject_tokens(email: dict) -> set:
     # Remove Re: Fwd: etc.
     subj = re.sub(r"^(re|fwd|fw)\s*:\s*", "", subj, flags=re.IGNORECASE)
     tokens = re.findall(r"[a-z0-9]+", subj)
-    stop = {"re", "fwd", "fw", "the", "and", "or", "of", "in", "on", "for", "to", "is", "a", "an"}
-    return {t for t in tokens if len(t) > 2 and t not in stop}
+    return {t for t in tokens if len(t) > 2 and t not in STOP_WORDS}
 
 
 def build_email_links(emails: List[dict]) -> None:
@@ -328,69 +411,100 @@ def build_memory_context(email: dict, max_linked: int = 5) -> str:
     1. Cross-email links (same sender, same domain, shared subject tokens)
     2. Persistent memory entries (category history from previous runs)
     3. Knowledge base entries for entities mentioned in the email
+    4. Sender interaction summary (total count, recent topics)
+    5. Active todo items related to this thread/sender
 
     This is the "brain" output that gets injected into LLM prompts.
     """
     parts = []
 
-    # 1. Linked emails
     gid = email.get("id")
+
+    # 1. Linked emails
     if gid:
         linked = get_linked_emails(gid, limit=max_linked)
-        for le in linked:
-            link_type = le.get("link_type", "related")
-            summary = le.get("summary") or le.get("snippet", "")[:200]
-            sender = le.get("sender", "")
-            subject = le.get("subject", "")
-            date = le.get("date", "")
-            category = le.get("category", "")
-            line = (
-                f"[{link_type}] From: {sender} | {date}\n"
-                f"  Subject: {subject}\n"
-                f"  Category: {category}\n"
-                f"  Summary: {summary}"
-            )
-            parts.append(line)
+        if linked:
+            link_lines = []
+            for le in linked:
+                link_type = le.get("link_type", "related")
+                summary = le.get("summary") or le.get("snippet", "")[:200]
+                sender = le.get("sender", "")
+                subject = le.get("subject", "")
+                date = le.get("date", "")
+                category = le.get("category", "")
+                link_lines.append(
+                    f"[{link_type}] {sender} | {date}\n"
+                    f"  Subject: {subject} | Category: {category}\n"
+                    f"  Summary: {summary}"
+                )
+            parts.append("Linked emails:\n" + "\n".join(link_lines))
 
-    # 2. Category history from the memory table
-    #    Shows what categories similar subjects were assigned before.
+    # 2. Sender interaction summary
+    try:
+        sender_email = _sender_email(email)
+        if sender_email:
+            history = get_sender_history(sender_email, exclude_id=gid or "", limit=5)
+            if history:
+                total_count = len(history)
+                topics = [h.get("subject", "") for h in history[:3] if h.get("subject")]
+                cats = [h.get("category", "") for h in history if h.get("category")]
+                most_common_cat = max(set(cats), key=cats.count) if cats else "unknown"
+                sender_summary = (
+                    f"Sender interaction: {total_count} previous emails, "
+                    f"usually categorized as '{most_common_cat}'. "
+                    f"Recent topics: {'; '.join(topics[:3])}"
+                )
+                parts.append(sender_summary)
+    except Exception:
+        pass
+
+    # 3. Category history from the memory table
     try:
         cat_memories = get_memory_entries(kind="category", limit=15)
         if cat_memories:
-            # Find entries with overlapping keywords to this email's subject
             email_subj = (email.get("subject") or "").lower()
             email_tokens = set(re.findall(r"[a-z0-9]{3,}", email_subj))
-            stop = {"the", "and", "for", "from", "your", "this", "that", "with"}
-            email_tokens -= stop
+            email_tokens -= STOP_WORDS
             relevant = []
             for mem in cat_memories:
                 mem_subj = (mem.get("value") or "").lower()
                 mem_tokens = set(re.findall(r"[a-z0-9]{3,}", mem_subj))
-                mem_tokens -= stop
+                mem_tokens -= STOP_WORDS
                 shared = email_tokens & mem_tokens
                 if len(shared) >= 1:
-                    relevant.append(f"  Previously: \"{mem.get('value', '')}\" → {mem.get('key', '')}")
+                    relevant.append(f"  \"{mem.get('value', '')}\" → {mem.get('key', '')}")
             if relevant:
-                parts.append("Category history (how similar emails were classified):\n" + "\n".join(relevant[:5]))
+                parts.append("Category history:\n" + "\n".join(relevant[:5]))
     except Exception:
         pass
 
-    # 3. Knowledge base entries for sender
+    # 4. Knowledge base entries for sender
     try:
         sender = email.get("sender", "")
         if sender:
             sender_name = sender.split("<")[0].strip().strip('"').strip("'")
             if sender_name and len(sender_name) > 2:
                 kb_entries = lookup_knowledge(sender_name)
-                for kb in kb_entries[:2]:
-                    parts.append(f"Known entity: {kb['entity']} ({kb['entity_type']}): {kb['info']}")
+                for kb in kb_entries[:3]:
+                    parts.append(f"Known: {kb['entity']} ({kb['entity_type']}): {kb['info']}")
+    except Exception:
+        pass
+
+    # 5. Active todo items that might relate to this thread/sender
+    try:
+        todos = get_todo_items()
+        if todos and gid:
+            related_todos = [t for t in todos if t.get("email_id") == gid]
+            if related_todos:
+                todo_lines = [f"  - {t['task']}" for t in related_todos[:3]]
+                parts.append("Active todos for this email:\n" + "\n".join(todo_lines))
     except Exception:
         pass
 
     if not parts:
         return ""
 
-    return "=== Memory: Related emails from history ===\n\n" + "\n\n".join(parts)
+    return "=== Memory Context ===\n\n" + "\n\n".join(parts)
 
 
 def get_sender_history(sender_email: str, exclude_id: str = "", limit: int = 5) -> List[dict]:
@@ -781,10 +895,10 @@ def upsert_rule(match_type: str, match_value: str, label_slug: str) -> None:
 
 
 def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug: str) -> int:
-    """Scan all stored emails and add *label_slug* where the rule matches.
+    """Scan all stored emails and set *label_slug* where the rule matches.
 
-    Emails support up to 2 comma-separated categories.  If the email already
-    has this slug or already has 2 categories, it is skipped.
+    Each email has exactly one category. If the rule matches, the category is
+    replaced with label_slug.
     Returns the number of emails updated.
     """
     init_db()
@@ -801,9 +915,8 @@ def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug:
         )
         rows = cur.fetchall()
         for gmail_id, subject, sender, category in rows:
-            category = category or "normal"
-            cats = [c.strip() for c in category.split(",") if c.strip()]
-            if label_slug in cats or len(cats) >= 2:
+            category = (category or "normal").strip()
+            if category == label_slug:
                 continue
 
             # Check if the rule matches this email
@@ -822,10 +935,9 @@ def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug:
                     matched = addr.split("@", 1)[1] == match_value
 
             if matched:
-                cats.append(label_slug)
                 cur.execute(
                     "UPDATE email_processed SET category = ? WHERE gmail_id = ?",
-                    (",".join(cats), gmail_id),
+                    (label_slug, gmail_id),
                 )
                 updated += 1
         conn.commit()

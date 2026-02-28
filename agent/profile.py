@@ -9,6 +9,8 @@ from agent.memory_store import upsert_user_profile, get_user_profile
 
 PROFILE_PATH = Path(__file__).parent.parent / "data" / "profile.json"
 
+_profile_cache: Dict[str, Any] = {}  # Simple per-process cache for load_profile
+
 
 def _load_all_profiles() -> Dict[str, Any]:
     if not PROFILE_PATH.exists():
@@ -38,9 +40,12 @@ def get_current_user_email() -> str:
 
 
 def load_profile(email: Optional[str] = None) -> Dict[str, Any]:
-    """Load merged profile for the given (or current) user from DB + profile.json."""
+    """Load merged profile for the given (or current) user from DB + profile.json (cached)."""
     if not email:
         email = get_current_user_email()
+
+    if email in _profile_cache:
+        return _profile_cache[email]
 
     base: Dict[str, Any] = {}
     row = get_user_profile(email)
@@ -59,6 +64,7 @@ def load_profile(email: Optional[str] = None) -> Dict[str, Any]:
     profiles = _load_all_profiles()
     from_file = profiles.get(email) or {}
     base.update(from_file)
+    _profile_cache[email] = base
     return base
 
 

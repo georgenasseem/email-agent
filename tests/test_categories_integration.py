@@ -59,6 +59,7 @@ def fresh_db():
         for t in tables:
             cur.execute(f"DROP TABLE IF EXISTS [{t}]")
         conn.commit()
+    ms.reset_db_initialized()
     init_db()
     yield
 
@@ -516,7 +517,7 @@ class TestEdgeCases:
 
 
 class TestApplyRuleToExistingEmails:
-    """Tests for applying a new rule to existing emails (multi-category, up to 2)."""
+    """Tests for applying a new rule to existing emails (single-category replacement)."""
 
     def test_applies_subject_keyword(self):
         ensure_default_labels()
@@ -530,23 +531,27 @@ class TestApplyRuleToExistingEmails:
         store_processed_email({"id": "e2", "category": "important"})
         updated = apply_rule_to_existing_emails("subject_keyword", "hackathon", "hackathon")
         assert updated == 1
-        # Verify e1 now has two categories
+        # Verify e1 category is replaced (single-category model)
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT category FROM email_processed WHERE gmail_id = 'e1'")
             cat = cur.fetchone()[0]
-        assert "hackathon" in cat.split(",")
-        assert "normal" in cat.split(",")
+        assert cat == "hackathon"
 
-    def test_respects_two_category_limit(self):
+    def test_replaces_existing_category(self):
         ensure_default_labels()
         create_label("Alpha")
         create_label("Beta")
         store_raw_email({"id": "e3", "thread_id": "t3", "subject": "Alpha Beta Test",
                          "sender": "c@x.com", "date": "Mon, 1 Jan 2026", "body": "", "snippet": ""})
-        store_processed_email({"id": "e3", "category": "urgent,alpha"})
+        store_processed_email({"id": "e3", "category": "alpha"})
         updated = apply_rule_to_existing_emails("subject_keyword", "beta", "beta")
-        assert updated == 0  # already has 2 categories
+        assert updated == 1  # single-category: replaces existing
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT category FROM email_processed WHERE gmail_id = 'e3'")
+            cat = cur.fetchone()[0]
+        assert cat == "beta"
 
     def test_skips_already_tagged(self):
         ensure_default_labels()

@@ -10,9 +10,19 @@ def summarize_email(email: dict) -> dict:
     """Summarize a single email in its own LLM call.
 
     This avoids batch prompts that can mix up summaries between emails.
+    Skips LLM for very short emails where the body IS the summary.
     """
     if not email:
         return email
+
+    body_text = (email.get("clean_body") or email.get("body") or email.get("snippet") or "")
+
+    # Skip LLM for trivially short emails — the body itself is the summary
+    if len(body_text.strip()) < 100:
+        short_summary = body_text.strip().replace("\n", " ")[:200]
+        if not short_summary:
+            short_summary = email.get("subject", "(No content)")
+        return {**email, "summary": short_summary}
 
     llm = get_llm(task="summarize")
     parser = StrOutputParser()
@@ -28,7 +38,7 @@ RULES:
 
 Output ONLY the summary sentence (no bullet points, no JSON, no explanations)."""
 
-    body = (email.get("clean_body") or email.get("body") or email.get("snippet") or "")[:600]
+    body = body_text[:1000]
     thread_ctx = (email.get("thread_context") or "")[:400]
     enriched_ctx = (email.get("enriched_context") or "")[:400]
 
@@ -47,7 +57,7 @@ Output ONLY the summary sentence (no bullet points, no JSON, no explanations).""
     if memory_ctx:
         extra += f"\n{memory_ctx}"
 
-    prompt = f"""Summarize this email in one sentence (min 15 words). Focus on WHO, WHAT, and WHEN.
+    prompt = f"""Summarize this email in one sentence (5-80 words). Focus on WHO, WHAT, and WHEN.
 
 From: {email.get('sender','')}
 Subject: {email.get('subject','')}

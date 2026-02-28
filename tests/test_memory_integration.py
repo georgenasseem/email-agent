@@ -77,6 +77,7 @@ def fresh_db():
     # Delete and recreate
     if _test_db.exists():
         _test_db.unlink()
+    ms.reset_db_initialized()
     init_db()
     yield
     # Cleanup after test
@@ -307,7 +308,7 @@ class TestBuildMemoryContext:
 
         ctx = build_memory_context(emails[0])
         assert ctx  # non-empty
-        assert "Related emails from history" in ctx
+        assert "Linked emails" in ctx
         assert "carol@acme.com" in ctx
 
     def test_returns_empty_for_unlinked_email(self):

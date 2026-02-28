@@ -8,10 +8,25 @@ from agent.email_memory import build_memory_context, match_rules_for_email, get_
 CATEGORIES = ["urgent", "important", "normal", "informational", "newsletter"]
 
 
+def _get_valid_categories() -> list[str]:
+    """Return the list of valid category slugs based on enabled labels.
+
+    System categories that have been disabled/deleted by the user are excluded.
+    """
+    try:
+        enabled = get_enabled_labels()
+        enabled_slugs = {lb["slug"] for lb in enabled}
+        return [c for c in CATEGORIES if c in enabled_slugs] + [
+            lb["slug"] for lb in enabled if lb["slug"] not in CATEGORIES
+        ]
+    except Exception:
+        return CATEGORIES
+
+
 def _build_preview(email: dict) -> str:
     """Return the best preview text for categorization."""
     text = email.get("clean_body") or email.get("body") or email.get("snippet") or ""
-    return text[:250]
+    return text[:1000]
 
 
 def _apply_newsletter_heuristics(email: dict, category: str) -> str:
@@ -57,7 +72,7 @@ def _apply_newsletter_heuristics(email: dict, category: str) -> str:
 
 
 def categorize_email(email: dict) -> dict:
-    """Categorize a single email: check user-defined rules first, then LLM, then heuristics."""
+    """Categorize a single email: check user-defined rules first, then heuristics, then LLM."""
     if not email:
         return email
 
@@ -69,18 +84,22 @@ def categorize_email(email: dict) -> dict:
     except Exception:
         pass
 
-    # ── 2. Build the dynamic category list (system + user-defined) ──
+    # ── 2. Run newsletter heuristics BEFORE LLM to save a call ──
+    heuristic_cat = _apply_newsletter_heuristics(email, "normal")
+    if heuristic_cat == "newsletter":
+        return {**email, "category": "newsletter"}
+
+    # ── 3. Build the dynamic category list (enabled system + user-defined) ──
+    valid_cats = _get_valid_categories()
     all_labels = []
     try:
         all_labels = get_enabled_labels()
     except Exception:
         pass
-    # Combine system + user slugs; user labels appear after system ones in the prompt
-    user_label_slugs = [lb["slug"] for lb in all_labels if lb["slug"] not in CATEGORIES]
-    valid_cats = CATEGORIES + user_label_slugs
 
     # Build the extra labels block for the prompt
     user_labels_block = ""
+    user_label_slugs = [s for s in valid_cats if s not in CATEGORIES]
     if user_label_slugs:
         label_lines = []
         for lb in all_labels:
@@ -89,22 +108,28 @@ def categorize_email(email: dict) -> dict:
                 label_lines.append(f"- {lb['slug']}: {desc}")
         user_labels_block = "\n\nADDITIONAL USER-DEFINED CATEGORIES:\n" + "\n".join(label_lines) + "\nPrefer these when the email clearly fits."
 
-    # ── 3. LLM categorization ──
+    # Build dynamic category descriptions for enabled system categories only
+    _cat_descriptions = {
+        "urgent": "- urgent: MUST act TODAY. Security alerts, account verification, boss/CEO urgent requests, same-day deadlines.",
+        "important": "- important: Act within 24-48h. Client requests, approvals, feedback, rescheduling, time-sensitive offers.",
+        "normal": "- normal: Routine. Meeting reminders, confirmations, coordination, FYI. Default when unsure.",
+        "informational": "- informational: Informational only, no action. Event listings, general updates.",
+        "newsletter": "- newsletter: Marketing, newsletters, promotions, unsubscribe links, mass mailings.",
+    }
+    _enabled_sys_cats = [c for c in CATEGORIES if c in valid_cats]
+    _cat_block = "\n".join(_cat_descriptions[c] for c in _enabled_sys_cats if c in _cat_descriptions)
+
+    # ── 4. LLM categorization ──
     llm = get_llm(task="categorize")
     parser = StrOutputParser()
 
     system = f"""You are an email triage specialist. Assign ONE category for this email.
 
 CATEGORIES (use exactly these words):
-- urgent: MUST act TODAY. Security alerts, account verification, boss/CEO urgent requests, same-day deadlines.
-- important: Act within 24-48h. Client requests, approvals, feedback, rescheduling, time-sensitive offers.
-- normal: Routine. Meeting reminders, confirmations, coordination, FYI. Default when unsure.
-- informational: Informational only, no action. Event listings, general updates.
-- newsletter: Marketing, newsletters, promotions, unsubscribe links, mass mailings.{user_labels_block}
+{_cat_block}{user_labels_block}
 
 CRITICAL:
-- "newsletter" or "informational": Newsletters, event listings, marketing, promotions, "click here", tracking pixels, noreply senders. NEVER "urgent".
-- "urgent": Security alert, token expired, verify account, password reset, same-day deadline from boss.
+- "newsletter" or "informational": Newsletters, event listings, marketing, promotions, "click here", tracking pixels, noreply senders.
 - "normal": Default. Reminders, confirmations, routine updates, meeting locations.
 
 Output ONLY one word from the categories above."""
@@ -152,7 +177,6 @@ Category (one word only):"""
         else:
             cat = "normal"
 
-    cat = _apply_newsletter_heuristics(email, cat)
     return {**email, "category": cat}
 
 

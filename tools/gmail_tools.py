@@ -12,11 +12,17 @@ from agent.text_cleaner import clean_email_text
 
 logger = logging.getLogger(__name__)
 
+_gmail_service_cache = None
+
 
 def get_gmail_service():
-    """Authenticate and return Gmail API service."""
+    """Authenticate and return Gmail API service (cached per process)."""
+    global _gmail_service_cache
+    if _gmail_service_cache is not None:
+        return _gmail_service_cache
     creds = get_google_credentials()
-    return build("gmail", "v1", credentials=creds)
+    _gmail_service_cache = build("gmail", "v1", credentials=creds)
+    return _gmail_service_cache
 
 
 def get_profile_email() -> str:
@@ -243,7 +249,11 @@ def fetch_emails(max_results: int = 20, query: str = "in:inbox is:unread") -> li
 
     emails = []
     for msg_ref in messages:
-        msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
+        try:
+            msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
+        except Exception:
+            logger.warning("Failed to fetch message %s, skipping", msg_ref["id"])
+            continue
         payload = msg.get("payload", {})
         headers = payload.get("headers", [])
 
@@ -367,3 +377,18 @@ def extract_email_address(header_value: str) -> str:
         end = header_value.index(">")
         return header_value[start:end].strip()
     return header_value.strip()
+
+
+def archive_email(message_id: str) -> bool:
+    """Archive an email by removing the INBOX label. Returns True on success."""
+    try:
+        service = get_gmail_service()
+        service.users().messages().modify(
+            userId="me",
+            id=message_id,
+            body={"removeLabelIds": ["INBOX"]},
+        ).execute()
+        return True
+    except Exception:
+        logger.warning("Failed to archive message %s", message_id)
+        return False

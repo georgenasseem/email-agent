@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from tools.calendar_tools import find_free_slots, create_event
+from tools.calendar_tools import find_free_slots, create_event, get_user_timezone
 from tools.gmail_tools import extract_email_address
 from agent.meeting_extractor import extract_meeting_intent
 
@@ -54,9 +54,9 @@ def propose_meeting_times(
     intent["attendees"] = attendees
 
     duration = duration_minutes or intent.get("duration_minutes", 30)
-    tz = timezone.utc
+    tz = get_user_timezone()
     now = datetime.now(tz)
-    # Start from next working-hours window (tomorrow at 9 AM UTC)
+    # Start from next working-hours window (tomorrow at 9 AM in user's timezone)
     time_min = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
     time_max = time_min + timedelta(days=days_ahead)
 
@@ -84,7 +84,7 @@ def propose_meeting_times_simple(
 
     Returns dict with meeting_intent, free_slots, error.
     """
-    tz = timezone.utc
+    tz = get_user_timezone()
     now = datetime.now(tz)
     time_min = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
     time_max = time_min + timedelta(days=days_ahead)

@@ -336,9 +336,10 @@ class TestCreateEvent:
         assert "dateTime" in body["start"]
         assert body["attendees"] == [{"email": "bob@test.com"}]
 
+    @mock.patch("tools.calendar_tools.get_user_timezone", return_value="America/New_York")
     @mock.patch("tools.calendar_tools.get_calendar_service")
-    def test_naive_datetime_gets_utc(self, mock_get_svc):
-        """Naive datetimes should be upgraded to UTC."""
+    def test_naive_datetime_gets_user_tz(self, mock_get_svc, mock_tz):
+        """Naive datetimes should be upgraded to the user's timezone."""
         mock_service = mock.MagicMock()
         mock_service.events().insert().execute.return_value = {"id": "evt"}
         mock_get_svc.return_value = mock_service
@@ -349,8 +350,7 @@ class TestCreateEvent:
         create_event("Test", start, end)
         call_args = mock_service.events().insert.call_args
         body = call_args[1]["body"] if "body" in call_args[1] else call_args[0][0]
-        assert body["start"]["timeZone"] == "UTC"
-        assert "Z" in body["start"]["dateTime"]
+        assert body["start"]["timeZone"] == "America/New_York"
 
 
 # ─── Test 6: propose_meeting_times ─────────────────────────────────────────

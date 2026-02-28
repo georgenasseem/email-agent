@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 DB_PATH = Path(__file__).parent.parent / "data" / "memory.db"
 
+_DB_INITIALIZED = False  # Guard: only run DDL once per process
+
 
 def _ensure_db_dir() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -25,7 +27,14 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist (runs DDL only once per process).
+
+    Call reset_db_initialized() before init_db() if you need to force re-creation
+    (e.g. in tests after deleting the DB file).
+    """
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED:
+        return
     with get_connection() as conn:
         cur = conn.cursor()
 
@@ -226,6 +235,45 @@ def init_db() -> None:
         if "enriched_context" not in proc_cols:
             cur.execute("ALTER TABLE email_processed ADD COLUMN enriched_context TEXT DEFAULT ''")
             conn.commit()
+
+        # ── Migration: add archived column if missing ──
+        cur.execute("PRAGMA table_info(email_processed)")
+        proc_cols2 = {row[1] for row in cur.fetchall()}
+        if "archived" not in proc_cols2:
+            cur.execute("ALTER TABLE email_processed ADD COLUMN archived INTEGER DEFAULT 0")
+            conn.commit()
+
+        # ── Performance indexes ─────────────────────────────────────────
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_internal_date ON emails(internal_date DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails(sender)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_email_links_a ON email_links(email_id_a)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_email_links_b ON email_links(email_id_b)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory(kind)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_todo_created ON todo_items(created_at DESC)")
+        conn.commit()
+
+    _DB_INITIALIZED = True
+
+
+def mark_email_archived(gmail_id: str) -> None:
+    """Mark an email as archived in the local DB so it stays hidden on reload."""
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE email_processed SET archived = 1 WHERE gmail_id = ?",
+            (gmail_id,),
+        )
+        conn.commit()
+
+
+def reset_db_initialized() -> None:
+    """Reset the init guard so init_db() will re-run DDL.
+
+    Only needed in tests that delete and recreate the DB file between runs.
+    """
+    global _DB_INITIALIZED
+    _DB_INITIALIZED = False
 
 
 def upsert_user_profile(

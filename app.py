@@ -18,8 +18,9 @@ def safe_key(email_id: str) -> str:
 
 from config import CREDENTIALS_FILE, TOKEN_FILE
 from tools.google_auth import get_google_credentials
-from tools.gmail_tools import send_email, extract_email_address
+from tools.gmail_tools import send_email, extract_email_address, archive_email
 from agent.langgraph_pipeline import run_email_pipeline, load_from_memory
+from agent.memory_store import mark_email_archived
 from agent.email_memory import (
     get_email_count,
     add_todo_item, get_todo_items, remove_todo_item,
@@ -157,12 +158,12 @@ st.markdown(
     }}
 
     .stButton>button {{
-        border-radius: 8px;
-        padding: 6px 18px;
+        border-radius: 6px;
+        padding: 4px 14px;
         background: {accent_color};
         color: #ffffff;
         border: none;
-        font-size: 13px;
+        font-size: 12px;
         font-weight: 500;
         transition: background 0.15s ease, box-shadow 0.15s ease;
     }}
@@ -245,10 +246,18 @@ st.markdown(
         background: #7c3aed;
         box-shadow: 0 2px 8px rgba(139,92,246,0.35);
     }}
+    div[class*="qa-archive-"] .stButton>button {{
+        background: #475569;
+    }}
+    div[class*="qa-archive-"] .stButton>button:hover {{
+        background: #64748b;
+        box-shadow: 0 2px 8px rgba(100,116,139,0.35);
+    }}
     /* Remove extra padding/gap inside keyed QA containers */
     div[class*="qa-reply-"],
     div[class*="qa-todo-"],
-    div[class*="qa-sched-"] {{
+    div[class*="qa-sched-"],
+    div[class*="qa-archive-"] {{
         gap: 0 !important;
     }}
 
@@ -260,11 +269,11 @@ st.markdown(
 
     /* Email card item */
     .email-card {{
-        padding: 12px 14px;
-        border-radius: 10px;
+        padding: 8px 10px;
+        border-radius: 8px;
         border: 1px solid {border_soft};
         background: {'rgba(15,23,42,0.5)' if theme == 'dark' else 'rgba(255,255,255,0.8)'};
-        margin-bottom: 10px;
+        margin-bottom: 6px;
         transition: border-color 0.15s ease, background 0.15s ease;
         cursor: pointer;
     }}
@@ -274,20 +283,20 @@ st.markdown(
     }}
 
     .email-subject {{
-        font-size: 14px;
+        font-size: 13px;
         font-weight: 600;
         color: {text_color};
-        margin-bottom: 2px;
+        margin-bottom: 1px;
     }}
     .email-sender {{
-        font-size: 12px;
+        font-size: 11px;
         color: {muted_color};
-        margin-bottom: 4px;
+        margin-bottom: 2px;
     }}
     .email-summary {{
-        font-size: 13px;
+        font-size: 12px;
         color: {'#cbd5e1' if theme == 'dark' else '#374151'};
-        line-height: 1.4;
+        line-height: 1.3;
     }}
 
     /* Badges */
@@ -534,6 +543,15 @@ if "emails" not in st.session_state and "_memory_loaded" not in st.session_state
         cached = load_from_memory()
         if cached:
             st.session_state["emails"] = cached
+            # Pre-compute category suggestions on first load
+            try:
+                _raw_p = propose_categories_from_history(min_sender_count=2)
+                _filt_p = filter_proposals_with_llm(_raw_p) if _raw_p else []
+                if _filt_p:
+                    st.session_state["_cat_proposals"] = _filt_p
+                st.session_state["_cat_proposals_stale"] = False
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -565,24 +583,20 @@ os.environ["LLM_PROVIDER"] = llm_provider_map.get(current_llm_display, "qwen_loc
 if st.session_state.get("is_analyzing", False):
     actual_query = "in:inbox"
     retrain_mode = st.session_state.pop("_retrain", False)
-    spinner_msg = (
-        "Retraining: reprocessing all stored emails..."
-        if retrain_mode
-        else "Analyzing inbox and preparing suggestions..."
-    )
-    with st.spinner(spinner_msg):
+    status_label = "Retraining..." if retrain_mode else "Analyzing inbox..."
+    with st.status(status_label, expanded=True) as status:
         try:
-            # If we already have emails, fetch a larger batch to catch all
-            # recent ones; otherwise just get the initial MIN_FETCH.
             stored_count = get_email_count()
             fetch_count = MAX_FETCH if stored_count >= MIN_FETCH else MIN_FETCH
 
+            status.update(label="Fetching emails...")
             state = run_email_pipeline(
                 query=actual_query,
                 max_emails=fetch_count,
                 unread_only=False,
                 retrain=retrain_mode,
             )
+            status.update(label="Processing complete")
             emails = state.get("emails") or []
             learned = state.get("style_notes") or ""
             if learned:
@@ -593,8 +607,24 @@ if st.session_state.get("is_analyzing", False):
             st.session_state["emails"] = emails
             if "pipeline_error" in st.session_state:
                 del st.session_state["pipeline_error"]
+
+            # Pre-compute suggested categories so Categories tab loads instantly
+            status.update(label="Computing category suggestions...")
+            try:
+                _raw_proposals = propose_categories_from_history(min_sender_count=2)
+                _proposals = filter_proposals_with_llm(_raw_proposals) if _raw_proposals else []
+                if _proposals:
+                    st.session_state["_cat_proposals"] = _proposals
+                else:
+                    st.session_state.pop("_cat_proposals", None)
+                st.session_state["_cat_proposals_stale"] = False
+            except Exception:
+                st.session_state["_cat_proposals_stale"] = True
+
+            status.update(label=f"Done — {len(emails)} emails loaded", state="complete")
         except Exception as e:
             st.session_state["pipeline_error"] = str(e)
+            status.update(label="Error", state="error")
             st.rerun()
         finally:
             st.session_state["is_analyzing"] = False
@@ -614,7 +644,7 @@ if _active_cat_filter:
     if _active_cat_filter == "__needs_action__":
         filtered = [e for e in filtered if e.get("needs_action")]
     else:
-        filtered = [e for e in filtered if _active_cat_filter in [c.strip() for c in (e.get("category", "normal") or "normal").split(",")]]
+        filtered = [e for e in filtered if (e.get("category", "normal") or "normal").split(",")[0].strip() == _active_cat_filter]
 
 # Always sort by newest first
 filtered.sort(key=lambda x: x.get("internal_date", 0), reverse=True)
@@ -735,20 +765,14 @@ with draft_col:
             st.markdown("<div class='card-muted'>Select an email to change its category.</div>", unsafe_allow_html=True)
         else:
             _re_cat_raw = _sel_email.get("category", "normal") or "normal"
-            _re_cat_parts = [c.strip() for c in _re_cat_raw.split(",") if c.strip()]
-            _re_cat = _re_cat_parts[0]  # primary category
+            _re_cat = _re_cat_raw.split(",")[0].strip()
             _re_subj = html.escape(str(_sel_email.get("subject", "(No subject)")))
             _re_sender_raw = _sel_email.get("sender", "")
             _re_sender_match = re.match(r'^([^<]+)', _re_sender_raw)
             _re_sender = html.escape((_re_sender_match.group(1).strip() if _re_sender_match else _re_sender_raw)[:40])
             _re_cat_color = _label_color_map.get(_re_cat, "#94a3b8")
 
-            # Build display showing all categories
-            _re_cat_display_parts = []
-            for _rcp in _re_cat_parts:
-                _rcp_color = _label_color_map.get(_rcp, "#94a3b8")
-                _re_cat_display_parts.append(f"<span style='color:{_rcp_color};font-weight:600;'>[{html.escape(_rcp)}]</span>")
-            _re_cat_display = " ".join(_re_cat_display_parts)
+            _re_cat_display = f"<span style='color:{_re_cat_color};font-weight:600;'>[{html.escape(_re_cat)}]</span>"
 
             _re_left, _re_right = st.columns([4, 2])
             with _re_left:
@@ -770,23 +794,18 @@ with draft_col:
                     label_visibility="collapsed",
                 )
                 if _re_new_cat != _re_cat:
-                    # Replace primary category, keep secondary if present
-                    _re_cat_parts[0] = _re_new_cat
-                    _re_final_cat = ",".join(_re_cat_parts)
                     record_category_override(_sel_email, _re_new_cat)
-                    _sel_email["category"] = _re_final_cat
-                    st.session_state["selected_email_obj"]["category"] = _re_final_cat
-                    # Also update in the emails list
+                    _sel_email["category"] = _re_new_cat
+                    st.session_state["selected_email_obj"]["category"] = _re_new_cat
                     for _e in st.session_state.get("emails", []):
                         if _e.get("id") == _sel_email.get("id"):
-                            _e["category"] = _re_final_cat
+                            _e["category"] = _re_new_cat
                             break
                     st.rerun()
 
-        # ── Suggested Categories (auto-triggered on every tab open) ──
+        # ── Suggested Categories ──
         st.markdown("---")
-        # Fetch proposals each time the Categories tab is shown
-        # (cheap DB query + quick LLM filter, always up-to-date)
+        # Only re-compute if flagged stale (after accepting a proposal or retrain)
         if "_cat_proposals" not in st.session_state or st.session_state.get("_cat_proposals_stale", True):
             _raw_proposals = propose_categories_from_history(min_sender_count=2)
             _proposals = filter_proposals_with_llm(_raw_proposals) if _raw_proposals else []
@@ -798,17 +817,15 @@ with draft_col:
 
         if st.session_state.get("_cat_proposals"):
             st.markdown("**Suggested Categories**")
-            # Muted inline pill styling — auto-width, transparent background
             st.markdown(
                 "<style>"
-                ".suggest-cat-wrap .stButton {display: inline-block !important; width: auto !important;}"
                 ".suggest-cat-wrap .stButton>button {"
                 "  background: transparent !important;"
                 "  border: 1px solid #475569 !important;"
                 "  color: #cbd5e1 !important;"
                 "  font-weight: 400 !important;"
                 "  font-size: 13px !important;"
-                "  padding: 4px 16px !important;"
+                "  padding: 4px 12px !important;"
                 "  width: auto !important;"
                 "  min-width: 0 !important;"
                 "}"
@@ -818,57 +835,56 @@ with draft_col:
                 "  color: #f1f5f9 !important;"
                 "  box-shadow: none !important;"
                 "}"
-                ".suggest-cat-wrap {display: flex; flex-wrap: wrap; gap: 8px;}"
                 "</style>",
                 unsafe_allow_html=True,
             )
-            _sug_container = st.container()
-            _sug_container.markdown('<div class="suggest-cat-wrap">', unsafe_allow_html=True)
+            _sug_container = st.container(key="suggest-cat-wrap")
             with _sug_container:
-                for pi, prop in enumerate(st.session_state["_cat_proposals"]):
-                    if st.button(prop["proposed_name"], key=f"accept_prop_{pi}"):
-                        try:
-                            from agent.email_memory import get_label_by_slug, _slugify, upsert_rule
-                            _prop_slug = _slugify(prop["proposed_name"])
-                            existing = get_label_by_slug(_prop_slug)
-                            if existing:
-                                new_lb = existing
-                            else:
-                                _rand_color = random.choice(_NICE_COLORS)
-                                new_lb = create_label(prop["proposed_name"], color=_rand_color)
-                            upsert_rule(prop["match_type"], prop["match_value"], new_lb["slug"])
-                            # Apply the new rule to all existing emails (up to 2 categories)
-                            _applied = apply_rule_to_existing_emails(prop["match_type"], prop["match_value"], new_lb["slug"])
-                            # Refresh in-memory emails so UI reflects changes immediately
-                            if _applied and "emails" in st.session_state:
-                                for _se in st.session_state["emails"]:
-                                    _se_cats = [c.strip() for c in (_se.get("category", "normal") or "normal").split(",") if c.strip()]
-                                    if new_lb["slug"] not in _se_cats and len(_se_cats) < 2:
-                                        # Re-check rule match in memory
-                                        _se_subj = (_se.get("subject") or "").lower()
-                                        _se_sender = (_se.get("sender") or "").lower()
-                                        _mv = prop["match_value"].lower().strip()
-                                        _mt = prop["match_type"]
-                                        _mem_match = False
-                                        if _mt == "subject_keyword" and _mv in _se_subj:
-                                            _mem_match = True
-                                        elif _mt == "sender":
-                                            _addr = _se_sender.split("<")[1].split(">")[0].strip() if "<" in _se_sender else _se_sender.strip()
-                                            _mem_match = _addr == _mv
-                                        elif _mt == "sender_domain":
-                                            _addr = _se_sender.split("<")[1].split(">")[0].strip() if "<" in _se_sender else _se_sender.strip()
-                                            if "@" in _addr:
-                                                _mem_match = _addr.split("@", 1)[1] == _mv
-                                        if _mem_match:
-                                            _se_cats.append(new_lb["slug"])
-                                            _se["category"] = ",".join(_se_cats)
-                            st.success(f"Created '{prop['proposed_name']}' – applied to {_applied} email{'s' if _applied != 1 else ''}")
-                            st.session_state["_cat_proposals"].pop(pi)
-                            st.session_state["_cat_proposals_stale"] = True
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
-            _sug_container.markdown('</div>', unsafe_allow_html=True)
+                _proposals = st.session_state["_cat_proposals"]
+                # Render in rows of up to 4 columns
+                _row_size = 4
+                for _row_start in range(0, len(_proposals), _row_size):
+                    _row_items = _proposals[_row_start:_row_start + _row_size]
+                    _cols = st.columns(len(_row_items))
+                    for _ci, prop in enumerate(_row_items):
+                        pi = _row_start + _ci
+                        with _cols[_ci]:
+                            if st.button(prop["proposed_name"], key=f"accept_prop_{pi}"):
+                                try:
+                                    from agent.email_memory import get_label_by_slug, _slugify, upsert_rule
+                                    _prop_slug = _slugify(prop["proposed_name"])
+                                    existing = get_label_by_slug(_prop_slug)
+                                    if existing:
+                                        new_lb = existing
+                                    else:
+                                        _rand_color = random.choice(_NICE_COLORS)
+                                        new_lb = create_label(prop["proposed_name"], color=_rand_color)
+                                    upsert_rule(prop["match_type"], prop["match_value"], new_lb["slug"])
+                                    _applied = apply_rule_to_existing_emails(prop["match_type"], prop["match_value"], new_lb["slug"])
+                                    if _applied and "emails" in st.session_state:
+                                        for _se in st.session_state["emails"]:
+                                            _se_subj = (_se.get("subject") or "").lower()
+                                            _se_sender = (_se.get("sender") or "").lower()
+                                            _mv = prop["match_value"].lower().strip()
+                                            _mt = prop["match_type"]
+                                            _mem_match = False
+                                            if _mt == "subject_keyword" and _mv in _se_subj:
+                                                _mem_match = True
+                                            elif _mt == "sender":
+                                                _addr = _se_sender.split("<")[1].split(">")[0].strip() if "<" in _se_sender else _se_sender.strip()
+                                                _mem_match = _addr == _mv
+                                            elif _mt == "sender_domain":
+                                                _addr = _se_sender.split("<")[1].split(">")[0].strip() if "<" in _se_sender else _se_sender.strip()
+                                                if "@" in _addr:
+                                                    _mem_match = _addr.split("@", 1)[1] == _mv
+                                            if _mem_match:
+                                                _se["category"] = new_lb["slug"]
+                                    st.success(f"Created '{prop['proposed_name']}' \u2013 applied to {_applied} email{'s' if _applied != 1 else ''}")
+                                    st.session_state["_cat_proposals"].pop(pi)
+                                    st.session_state["_cat_proposals_stale"] = True
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(str(e))
 
     elif active_tab == "Todo":
         # ── Todo List Panel ──────────────────────────────────────────
@@ -906,6 +922,10 @@ with draft_col:
 
             # Show email body as Gmail-like rendered HTML
             body_html = email.get("body_html") or ""
+            _plain = email.get("clean_body") or email.get("body") or email.get("snippet") or ""
+            # Dynamic height: scale with content, min 80px, max 400px
+            _text_len = len(body_html) if body_html else len(_plain)
+            _body_height = min(400, max(80, _text_len // 3))
             if body_html:
                 wrapped = (
                     '<div style="'
@@ -928,11 +948,10 @@ with draft_col:
                     '</style>'
                     + body_html + '</div>'
                 )
-                components.html(wrapped, height=400, scrolling=True)
+                components.html(wrapped, height=_body_height, scrolling=True)
             else:
-                body_text = email.get("clean_body") or email.get("body") or email.get("snippet") or ""
-                if body_text:
-                    safe = html.escape(html.unescape(body_text)).replace("\n", "<br>")
+                if _plain:
+                    safe = html.escape(html.unescape(_plain)).replace("\n", "<br>")
                     wrapped = (
                         '<div style="'
                         "font-family: 'Google Sans', Roboto, Arial, sans-serif;"
@@ -944,7 +963,7 @@ with draft_col:
                         'overflow-wrap: break-word;'
                         '">' + safe + '</div>'
                     )
-                    components.html(wrapped, height=400, scrolling=True)
+                    components.html(wrapped, height=_body_height, scrolling=True)
 
             # ── Quick Actions ────────────────────────────────────────
             options_key = f"reply_options_{eid}"
@@ -966,7 +985,9 @@ with draft_col:
                         return (1, o)
                     elif o.startswith("Todo:"):
                         return (2, o)
-                    return (3, o)
+                    elif o.startswith("Archive:"):
+                        return (3, o)
+                    return (4, o)
                 options = sorted(options, key=_qa_sort_key)
 
                 st.markdown("**Quick actions**")
@@ -975,6 +996,7 @@ with draft_col:
                         with st.container(key=f"qa-reply-{eid}-{j}"):
                             if st.button(opt, key=f"qa_{eid}_{j}", use_container_width=True):
                                 reply_desc = opt[len("Reply:"):].strip()
+                                st.session_state[f"_last_decision_{eid}"] = reply_desc
                                 if f"reply_generated_{eid}" in st.session_state:
                                     del st.session_state[f"reply_generated_{eid}"]
                                 with st.spinner("Drafting reply..."):
@@ -988,6 +1010,17 @@ with draft_col:
                                             st.error("Failed to generate draft.")
                                     except Exception as e:
                                         st.error(f"Error drafting reply: {str(e)}")
+                                st.rerun()
+                    elif opt.startswith("Archive:"):
+                        with st.container(key=f"qa-archive-{eid}-{j}"):
+                            if st.button(opt, key=f"qa_{eid}_{j}", use_container_width=True):
+                                _arc_id = email.get("id", "")
+                                archive_email(_arc_id)
+                                mark_email_archived(_arc_id)
+                                st.session_state["emails"] = [e for e in st.session_state.get("emails", []) if e.get("id") != _arc_id]
+                                st.session_state.pop("selected_email", None)
+                                st.session_state.pop("selected_email_obj", None)
+                                st.success("Archived.")
                                 st.rerun()
                     elif opt.startswith("Todo:"):
                         with st.container(key=f"qa-todo-{eid}-{j}"):
@@ -1069,10 +1102,6 @@ with draft_col:
                         st.session_state.pop(sched_key, None)
                         st.rerun()
 
-            if st.button("Custom instruction", key=f"qo_{eid}_custom", use_container_width=True):
-                st.session_state[f"reply_custom_{eid}"] = True
-                st.rerun()
-
             if st.session_state.get(f"reply_custom_{eid}"):
                 custom = st.text_input("Custom instruction", key=f"custom_instr_{eid}")
                 if st.button("Use and draft", key=f"use_custom_{eid}"):
@@ -1093,7 +1122,7 @@ with draft_col:
 
             if st.session_state.get(f"reply_generated_{eid}"):
                 st.markdown("---")
-                st.subheader("Generated draft")
+                st.markdown("**Generated draft**")
                 draft_val = st.session_state.get(f"reply_generated_{eid}")
                 st.text_area(
                     "Draft preview",
@@ -1102,7 +1131,7 @@ with draft_col:
                     key=f"preview_{eid}",
                     label_visibility="collapsed",
                 )
-                send_col, _ = st.columns([1, 1])
+                send_col, regen_col = st.columns([1, 1])
                 with send_col:
                     if st.button("Send now", key=f"send_now_{eid}"):
                         final_draft = st.session_state.get(f"preview_{eid}", draft_val)
@@ -1122,16 +1151,54 @@ with draft_col:
                                 del st.session_state[f"reply_generated_{eid}"]
                             except Exception as e:
                                 st.error(f"Failed to send message: {e}")
-            if st.button("Close email", key=f"close_{eid}", use_container_width=True):
-                for k in list(st.session_state.keys()):
-                    if eid in str(k):
-                        del st.session_state[k]
-                st.session_state.pop("selected_email", None)
-                st.session_state.pop(f"selected_email_obj", None)
-                st.rerun()
+                with regen_col:
+                    if st.button("Regenerate", key=f"regen_{eid}"):
+                        # Re-draft with the same decision
+                        _regen_decision = st.session_state.get(f"_last_decision_{eid}", "")
+                        del st.session_state[f"reply_generated_{eid}"]
+                        with st.spinner("Regenerating..."):
+                            try:
+                                current_style = st.session_state.get("learned_style") or load_persisted_style()
+                                draft_text = draft_reply(email, decision=_regen_decision, style_notes=current_style)
+                                if draft_text:
+                                    st.session_state[f"reply_generated_{eid}"] = draft_text
+                            except Exception:
+                                pass
+                        st.rerun()
+            _custom_col, _archive_col = st.columns([1, 1])
+            with _custom_col:
+                if st.button("Custom instruction", key=f"qo_{eid}_custom", use_container_width=True):
+                    st.session_state[f"reply_custom_{eid}"] = True
+                    st.rerun()
+            with _archive_col:
+                if st.button("Archive", key=f"archive_{eid}", use_container_width=True):
+                    _arc_id = email.get("id", "")
+                    archive_email(_arc_id)
+                    mark_email_archived(_arc_id)
+                    st.session_state["emails"] = [e for e in st.session_state.get("emails", []) if e.get("id") != _arc_id]
+                    st.session_state.pop("selected_email", None)
+                    st.session_state.pop("selected_email_obj", None)
+                    st.success("Archived.")
+                    st.rerun()
 
 with email_col:
     st.markdown("### Emails")
+
+    # ── Search bar ──
+    _search_q = st.text_input("Search", key="_email_search", placeholder="Filter by subject or sender...", label_visibility="collapsed")
+    if _search_q:
+        _sq = _search_q.lower()
+        filtered = [e for e in filtered if _sq in (e.get("subject", "") or "").lower() or _sq in (e.get("sender", "") or "").lower()]
+
+    # ── Pagination ──
+    _PAGE_SIZE = 20
+    _total_pages = max(1, (len(filtered) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    _current_page = st.session_state.get("_email_page", 1)
+    if _current_page > _total_pages:
+        _current_page = _total_pages
+    _page_start = (_current_page - 1) * _PAGE_SIZE
+    _page_end = _page_start + _PAGE_SIZE
+    _page_emails = filtered[_page_start:_page_end]
 
     # Pre-load label colors for badges
     _label_color_map = {}
@@ -1141,10 +1208,8 @@ with email_col:
     except Exception:
         pass
 
-    for i, email in enumerate(filtered):
-        cat_raw = email.get("category", "normal") or "normal"
-        cat_list = [c.strip() for c in cat_raw.split(",") if c.strip()]
-        cat = cat_list[0]  # primary category for compat
+    for i, email in enumerate(_page_emails):
+        cat = (email.get("category", "normal") or "normal").split(",")[0].strip()
         needs_action = email.get("needs_action", False)
         subject = email.get("subject", "(No subject)")
         sender_raw = email.get("sender", "")
@@ -1168,13 +1233,11 @@ with email_col:
         summary_html = html.escape(str(summary))
 
         action_badge = "<span class='badge-action'>Needs action</span>" if needs_action else ""
-        cat_badges = ""
-        for _cb_cat in cat_list:
-            if _cb_cat == "normal":
-                continue
-            _cb_color = _label_color_map.get(_cb_cat, "#94a3b8")
-            cat_badges += f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(_cb_cat))}</span> "
-        badges = f"{action_badge} {cat_badges}".strip()
+        cat_badge = ""
+        if cat != "normal":
+            _cb_color = _label_color_map.get(cat, "#94a3b8")
+            cat_badge = f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(cat))}</span>"
+        badges = f"{action_badge} {cat_badge}".strip()
 
         # Each email in its own container for CSS targeting
         eid_html = html.escape(str(email.get("id", "")), quote=True)
@@ -1238,3 +1301,17 @@ with email_col:
     })();
     </script>
     """, height=0)
+
+    # ── Pagination controls ──
+    if _total_pages > 1:
+        _pg_left, _pg_mid, _pg_right = st.columns([1, 2, 1])
+        with _pg_left:
+            if st.button("← Prev", key="_page_prev", disabled=_current_page <= 1):
+                st.session_state["_email_page"] = _current_page - 1
+                st.rerun()
+        with _pg_mid:
+            st.markdown(f"<div style='text-align:center;font-size:12px;color:{muted_color};padding-top:8px;'>Page {_current_page} of {_total_pages} ({len(filtered)} emails)</div>", unsafe_allow_html=True)
+        with _pg_right:
+            if st.button("Next →", key="_page_next", disabled=_current_page >= _total_pages):
+                st.session_state["_email_page"] = _current_page + 1
+                st.rerun()
