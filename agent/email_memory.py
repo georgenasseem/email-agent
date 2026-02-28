@@ -780,6 +780,58 @@ def upsert_rule(match_type: str, match_value: str, label_slug: str) -> None:
         conn.commit()
 
 
+def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug: str) -> int:
+    """Scan all stored emails and add *label_slug* where the rule matches.
+
+    Emails support up to 2 comma-separated categories.  If the email already
+    has this slug or already has 2 categories, it is skipped.
+    Returns the number of emails updated.
+    """
+    init_db()
+    match_value = match_value.lower().strip()
+    updated = 0
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT e.gmail_id, e.subject, e.sender, p.category
+            FROM emails e
+            LEFT JOIN email_processed p ON e.gmail_id = p.gmail_id
+            """
+        )
+        rows = cur.fetchall()
+        for gmail_id, subject, sender, category in rows:
+            category = category or "normal"
+            cats = [c.strip() for c in category.split(",") if c.strip()]
+            if label_slug in cats or len(cats) >= 2:
+                continue
+
+            # Check if the rule matches this email
+            matched = False
+            if match_type == "subject_keyword":
+                if match_value in (subject or "").lower():
+                    matched = True
+            elif match_type == "sender":
+                s = (sender or "").lower()
+                addr = s.split("<")[1].split(">")[0].strip() if "<" in s and ">" in s else (s.strip() if "@" in s else "")
+                matched = addr == match_value
+            elif match_type == "sender_domain":
+                s = (sender or "").lower()
+                addr = s.split("<")[1].split(">")[0].strip() if "<" in s and ">" in s else (s.strip() if "@" in s else "")
+                if addr and "@" in addr:
+                    matched = addr.split("@", 1)[1] == match_value
+
+            if matched:
+                cats.append(label_slug)
+                cur.execute(
+                    "UPDATE email_processed SET category = ? WHERE gmail_id = ?",
+                    (",".join(cats), gmail_id),
+                )
+                updated += 1
+        conn.commit()
+    return updated
+
+
 def delete_rule(rule_id: int) -> None:
     """Delete a category rule by ID."""
     init_db()
