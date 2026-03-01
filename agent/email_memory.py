@@ -907,15 +907,31 @@ def upsert_rule(match_type: str, match_value: str, label_slug: str) -> None:
         conn.commit()
 
 
-def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug: str) -> int:
-    """Scan all stored emails and set *label_slug* where the rule matches.
+def _parse_category_tags(category: str) -> tuple[str, list[str]]:
+    """Parse a comma-separated category string into (main_category, [extra_tags])."""
+    parts = [p.strip() for p in (category or "informational").split(",") if p.strip()]
+    main = parts[0] if parts else "informational"
+    extras = parts[1:] if len(parts) > 1 else []
+    return main, extras
 
-    Each email has exactly one category. If the rule matches, the category is
-    replaced with label_slug.
+
+def _build_category_string(main: str, extras: list[str]) -> str:
+    """Build a comma-separated category string from main + extras."""
+    parts = [main] + [e for e in extras if e != main]
+    return ",".join(parts)
+
+
+def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug: str) -> int:
+    """Scan all stored emails and apply *label_slug* where the rule matches.
+
+    For system categories (important/informational/newsletter): replaces the main category.
+    For user-defined tags: adds the tag alongside the existing main category
+    (e.g. "informational" -> "informational,hackathon").
     Returns the number of emails updated.
     """
     init_db()
     match_value = match_value.lower().strip()
+    is_system = label_slug in SYSTEM_CATEGORIES
     updated = 0
     with get_connection() as conn:
         cur = conn.cursor()
@@ -929,7 +945,12 @@ def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug:
         rows = cur.fetchall()
         for gmail_id, subject, sender, category in rows:
             category = (category or "informational").strip()
-            if category == label_slug:
+            main_cat, extras = _parse_category_tags(category)
+
+            # Skip if already tagged
+            if is_system and main_cat == label_slug:
+                continue
+            if not is_system and label_slug in extras:
                 continue
 
             # Check if the rule matches this email
@@ -948,9 +969,13 @@ def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug:
                     matched = addr.split("@", 1)[1] == match_value
 
             if matched:
+                if is_system:
+                    new_cat = _build_category_string(label_slug, extras)
+                else:
+                    new_cat = _build_category_string(main_cat, extras + [label_slug])
                 cur.execute(
                     "UPDATE email_processed SET category = ? WHERE gmail_id = ?",
-                    (label_slug, gmail_id),
+                    (new_cat, gmail_id),
                 )
                 updated += 1
         conn.commit()
@@ -967,7 +992,7 @@ def delete_rule(rule_id: int) -> None:
 
 
 def match_rules_for_email(email: dict) -> Optional[str]:
-    """Check email against category rules. Returns label slug if a rule matches, else None.
+    """Check email against category rules. Returns first matching label slug, or None.
 
     Priority: subject keyword match (content-first) > sender domain match > exact sender match.
     Content-based matching is prioritized because the same sender can send different
@@ -1023,6 +1048,67 @@ def match_rules_for_email(email: dict) -> Optional[str]:
                 return row[0]
 
     return None
+
+
+def match_all_rules_for_email(email: dict) -> list[str]:
+    """Return ALL matching rule slugs for an email (not just the first).
+
+    Used to collect all user-defined tags that apply, so emails can have
+    a system category plus multiple user tags (e.g. 'informational,hackathon').
+    """
+    init_db()
+    sender = (email.get("sender") or "").lower()
+    sender_email_addr = ""
+    if "<" in sender and ">" in sender:
+        sender_email_addr = sender.split("<")[1].split(">")[0].strip()
+    elif "@" in sender:
+        sender_email_addr = sender.strip()
+
+    sender_domain = ""
+    if sender_email_addr and "@" in sender_email_addr:
+        sender_domain = sender_email_addr.split("@", 1)[1]
+
+    subject = (email.get("subject") or "").lower()
+    enabled_slugs = {lb["slug"] for lb in get_enabled_labels()}
+
+    matched: list[str] = []
+    seen: set[str] = set()
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+
+        # Subject keyword matches
+        cur.execute(
+            "SELECT match_value, label_slug FROM category_rules WHERE match_type = 'subject_keyword' ORDER BY hits DESC"
+        )
+        for kw, slug in cur.fetchall():
+            if kw and kw in subject and slug in enabled_slugs and slug not in seen:
+                matched.append(slug)
+                seen.add(slug)
+
+        # Exact sender match
+        if sender_email_addr:
+            cur.execute(
+                "SELECT label_slug FROM category_rules WHERE match_type = 'sender' AND match_value = ?",
+                (sender_email_addr,),
+            )
+            for (slug,) in cur.fetchall():
+                if slug in enabled_slugs and slug not in seen:
+                    matched.append(slug)
+                    seen.add(slug)
+
+        # Domain match
+        if sender_domain:
+            cur.execute(
+                "SELECT label_slug FROM category_rules WHERE match_type = 'sender_domain' AND match_value = ?",
+                (sender_domain,),
+            )
+            for (slug,) in cur.fetchall():
+                if slug in enabled_slugs and slug not in seen:
+                    matched.append(slug)
+                    seen.add(slug)
+
+    return matched
 
 
 def record_category_override(email: dict, new_label_slug: str) -> None:
@@ -1144,7 +1230,7 @@ def propose_categories_from_history(min_sender_count: int = 2) -> List[dict]:
                 "count": cnt,
             })
 
-            if len(proposals) >= 10:
+            if len(proposals) >= 15:
                 break
 
     return proposals

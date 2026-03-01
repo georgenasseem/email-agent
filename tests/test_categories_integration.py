@@ -527,7 +527,7 @@ class TestEdgeCases:
 
 
 class TestApplyRuleToExistingEmails:
-    """Tests for applying a new rule to existing emails (single-category replacement)."""
+    """Tests for applying a new rule to existing emails (multi-tag model: user tags added alongside system category)."""
 
     def test_applies_subject_keyword(self):
         ensure_default_labels()
@@ -541,36 +541,36 @@ class TestApplyRuleToExistingEmails:
         store_processed_email({"id": "e2", "category": "important"})
         updated = apply_rule_to_existing_emails("subject_keyword", "hackathon", "hackathon")
         assert updated == 1
-        # Verify e1 category is replaced (single-category model)
+        # Verify e1 gets hackathon tag added alongside system category
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT category FROM email_processed WHERE gmail_id = 'e1'")
             cat = cur.fetchone()[0]
-        assert cat == "hackathon"
+        assert cat == "informational,hackathon"
 
-    def test_replaces_existing_category(self):
+    def test_adds_tag_to_existing_category(self):
         ensure_default_labels()
         create_label("Alpha")
         create_label("Beta")
         store_raw_email({"id": "e3", "thread_id": "t3", "subject": "Alpha Beta Test",
                          "sender": "c@x.com", "date": "Mon, 1 Jan 2026", "body": "", "snippet": ""})
-        store_processed_email({"id": "e3", "category": "alpha"})
+        store_processed_email({"id": "e3", "category": "informational,alpha"})
         updated = apply_rule_to_existing_emails("subject_keyword", "beta", "beta")
-        assert updated == 1  # single-category: replaces existing
+        assert updated == 1  # multi-tag: adds beta alongside existing tags
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT category FROM email_processed WHERE gmail_id = 'e3'")
             cat = cur.fetchone()[0]
-        assert cat == "beta"
+        assert cat == "informational,alpha,beta"
 
     def test_skips_already_tagged(self):
         ensure_default_labels()
         create_label("Research")
         store_raw_email({"id": "e4", "thread_id": "t4", "subject": "Research Paper",
                          "sender": "d@x.com", "date": "Mon, 1 Jan 2026", "body": "", "snippet": ""})
-        store_processed_email({"id": "e4", "category": "research"})
+        store_processed_email({"id": "e4", "category": "informational,research"})
         updated = apply_rule_to_existing_emails("subject_keyword", "research", "research")
-        assert updated == 0  # already has this category
+        assert updated == 0  # already has this tag
 
 
 # ── Cleanup temp DB ────────────────────────────────────────────────────────

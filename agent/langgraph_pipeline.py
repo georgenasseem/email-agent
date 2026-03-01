@@ -241,11 +241,13 @@ def postprocess_categories_node(state: EmailAgentState) -> dict:
     for e in emails:
         if not e.get("needs_action", False):
             continue
-        cat = (e.get("category") or "informational").lower()
-        if cat in ("informational", "newsletter"):
-            # Promote to important if it's enabled
+        cat_raw = (e.get("category") or "informational").lower()
+        main_cat = cat_raw.split(",")[0].strip()
+        if main_cat in ("informational", "newsletter"):
+            # Promote to important if it's enabled, preserve extra tags
             if "important" in _enabled:
-                e["category"] = "important"
+                extras = [t.strip() for t in cat_raw.split(",")[1:] if t.strip()]
+                e["category"] = ",".join(["important"] + extras) if extras else "important"
 
     return {"emails": emails}
 
@@ -263,8 +265,10 @@ def log_memory_node(state: EmailAgentState) -> dict:
         cat = e.get("category")
         subj = e.get("subject", "")
         if cat:
+            # Log the main category (first part of comma-separated)
+            main_cat = cat.split(",")[0].strip()
             try:
-                add_memory(user_email=user_email, kind="category", key=cat, value=subj, source="categorizer")
+                add_memory(user_email=user_email, kind="category", key=main_cat, value=subj, source="categorizer")
             except Exception:
                 continue
     return {}

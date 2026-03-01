@@ -3,7 +3,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 
 from agent.llm import get_llm
-from agent.email_memory import build_memory_context, match_rules_for_email, get_enabled_labels
+from agent.email_memory import build_memory_context, match_rules_for_email, match_all_rules_for_email, get_enabled_labels, SYSTEM_CATEGORIES
 
 CATEGORIES = ["important", "informational", "newsletter"]
 
@@ -72,22 +72,40 @@ def _apply_newsletter_heuristics(email: dict, category: str) -> str:
 
 
 def categorize_email(email: dict) -> dict:
-    """Categorize a single email: check user-defined rules first, then heuristics, then LLM."""
+    """Categorize a single email: check user-defined rules first, then heuristics, then LLM.
+
+    Returns email with 'category' set. Format: 'system_cat' or 'system_cat,tag1,tag2'
+    where system_cat is one of important/informational/newsletter and tags are
+    user-defined labels matched by rules.
+    """
     if not email:
         return email
 
-    # ── 1. Check user-defined category rules (sender / domain / keyword) ──
+    # ── 1. Collect ALL matching user-defined tags from rules ──
+    user_tags: list[str] = []
+    system_rule_match: str | None = None
     try:
-        rule_match = match_rules_for_email(email)
-        if rule_match:
-            return {**email, "category": rule_match}
+        all_matches = match_all_rules_for_email(email)
+        for slug in all_matches:
+            if slug in SYSTEM_CATEGORIES:
+                # First system category rule wins
+                if not system_rule_match:
+                    system_rule_match = slug
+            else:
+                user_tags.append(slug)
     except Exception:
         pass
+
+    # If a system category rule matched, use it directly (skip LLM)
+    if system_rule_match:
+        cat = ",".join([system_rule_match] + user_tags) if user_tags else system_rule_match
+        return {**email, "category": cat}
 
     # ── 2. Run newsletter heuristics BEFORE LLM to save a call ──
     heuristic_cat = _apply_newsletter_heuristics(email, "informational")
     if heuristic_cat == "newsletter":
-        return {**email, "category": "newsletter"}
+        cat = ",".join(["newsletter"] + user_tags) if user_tags else "newsletter"
+        return {**email, "category": cat}
 
     # ── 3. Build the dynamic category list (enabled system + user-defined) ──
     valid_cats = _get_valid_categories()
@@ -110,8 +128,8 @@ def categorize_email(email: dict) -> dict:
 
     # Build dynamic category descriptions for enabled system categories only
     _cat_descriptions = {
-        "important": "- important: Requires a response, decision, or task. Requests, approvals, deadlines, questions directed at you.",
-        "informational": "- informational: Informational only, no action needed. Updates, announcements, event listings, general FYI, routine confirmations, reminders, meeting updates.",
+        "important": "- important: The sender PERSONALLY expects YOU to take action — reply to their question, approve something, complete a task with a deadline. NOT for: general announcements, event invitations sent to many people, informational updates, or reminders.",
+        "informational": "- informational: Everything that is not a newsletter and does not require YOUR personal action. Announcements, event invitations, updates, FYI, reminders, meeting updates, group emails, notifications. DEFAULT when unsure.",
         "newsletter": "- newsletter: Marketing, newsletters, promotions, unsubscribe links, mass mailings.",
     }
     _enabled_sys_cats = [c for c in CATEGORIES if c in valid_cats]
@@ -133,8 +151,8 @@ MAIN CATEGORIES (use exactly these words):
 
 CRITICAL:
 - "newsletter": Newsletters, marketing, promotions, "click here", tracking pixels, noreply senders.
-- "informational": Announcements, event listings, routine confirmations, reminders, meeting updates, no reply needed. Default when unsure.
-- "important": The sender expects YOU to do something — reply, approve, complete a task.
+- "informational": Announcements, event invitations sent to many people, routine confirmations, reminders, meeting updates, group notifications, no reply needed. DEFAULT when unsure between important and informational.
+- "important": ONLY when the sender personally and directly asks YOU to do something specific — reply to a direct question, approve a request, complete a task with a deadline. Mass announcements, event invitations, and general updates are NOT important even if they contain deadlines.
 
 Output ONLY the category slug (or main,extra if an additional tag applies)."""
 
@@ -175,7 +193,7 @@ Category (one word only):"""
     # LLM may return "main,extra" format
     parts = [p.strip() for p in cat.split(",") if p.strip()]
     main_cat = parts[0] if parts else ""
-    extra_cat = parts[1] if len(parts) > 1 else None
+    llm_extra = parts[1] if len(parts) > 1 else None
 
     # Validate main category
     if main_cat not in valid_cats:
@@ -190,15 +208,21 @@ Category (one word only):"""
     # Ensure main_cat is a system category
     if main_cat not in CATEGORIES:
         # main_cat is a user label — swap it to extra and default main to informational
-        extra_cat = main_cat
+        llm_extra = main_cat
         main_cat = "informational"
 
-    # Validate extra category (must be a user-defined label, not a system category)
-    if extra_cat:
-        if extra_cat in CATEGORIES or extra_cat not in valid_cats:
-            extra_cat = None
+    # Validate LLM extra category (must be a user-defined label, not a system category)
+    if llm_extra:
+        if llm_extra in CATEGORIES or llm_extra not in valid_cats:
+            llm_extra = None
 
-    final_cat = f"{main_cat},{extra_cat}" if extra_cat else main_cat
+    # Combine: system category + LLM extra tag + rule-matched user tags
+    all_tags = []
+    if llm_extra and llm_extra not in user_tags:
+        all_tags.append(llm_extra)
+    all_tags.extend(t for t in user_tags if t != llm_extra)
+
+    final_cat = ",".join([main_cat] + all_tags) if all_tags else main_cat
     return {**email, "category": final_cat}
 
 

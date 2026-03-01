@@ -28,6 +28,7 @@ from agent.email_memory import (
     record_category_override, propose_categories_from_history,
     filter_proposals_with_llm,
     ensure_default_labels,
+    apply_rule_to_existing_emails,
     SYSTEM_CATEGORIES,
 )
 from agent.decision_suggester import suggest_decision
@@ -639,7 +640,7 @@ filtered = emails
 # Apply category filter if active
 _active_cat_filter = st.session_state.get("_cat_filter")
 if _active_cat_filter:
-    filtered = [e for e in filtered if (e.get("category", "informational") or "informational").strip() == _active_cat_filter]
+    filtered = [e for e in filtered if _active_cat_filter in [t.strip() for t in (e.get("category", "informational") or "informational").split(",")]]
 
 # Always sort by newest first
 filtered.sort(key=lambda x: x.get("internal_date", 0), reverse=True)
@@ -741,7 +742,9 @@ with draft_col:
             st.markdown("<div class='card-muted'>Select an email to change its category.</div>", unsafe_allow_html=True)
         else:
             _re_cat_raw = _sel_email.get("category", "informational") or "informational"
-            _re_cat = _re_cat_raw.split(",")[0].strip()
+            _re_cat_tags = [t.strip() for t in _re_cat_raw.split(",") if t.strip()]
+            _re_cat = _re_cat_tags[0] if _re_cat_tags else "informational"
+            _re_extras = _re_cat_tags[1:]
             _re_subj = html.escape(str(_sel_email.get("subject", "(No subject)")))
             _re_sender_raw = _sel_email.get("sender", "")
             _re_sender_match = re.match(r'^([^<]+)', _re_sender_raw)
@@ -770,12 +773,14 @@ with draft_col:
                     label_visibility="collapsed",
                 )
                 if _re_new_cat != _re_cat:
+                    # Preserve extra tags when changing main category
+                    _re_full_cat = ",".join([_re_new_cat] + _re_extras) if _re_extras else _re_new_cat
                     record_category_override(_sel_email, _re_new_cat)
-                    _sel_email["category"] = _re_new_cat
-                    st.session_state["selected_email_obj"]["category"] = _re_new_cat
+                    _sel_email["category"] = _re_full_cat
+                    st.session_state["selected_email_obj"]["category"] = _re_full_cat
                     for _e in st.session_state.get("emails", []):
                         if _e.get("id") == _sel_email.get("id"):
-                            _e["category"] = _re_new_cat
+                            _e["category"] = _re_full_cat
                             break
                     st.rerun()
 
@@ -836,7 +841,36 @@ with draft_col:
                                         _rand_color = random.choice(_NICE_COLORS)
                                         new_lb = create_label(prop["proposed_name"], color=_rand_color)
                                     upsert_rule(prop["match_type"], prop["match_value"], new_lb["slug"])
-                                    st.success(f"Created '{prop['proposed_name']}' — future matching emails will be categorized automatically.")
+                                    # Apply to existing emails retroactively
+                                    _n_updated = apply_rule_to_existing_emails(prop["match_type"], prop["match_value"], new_lb["slug"])
+                                    # Update session emails in-memory too
+                                    _match_val = prop["match_value"].lower()
+                                    _match_type = prop["match_type"]
+                                    for _se in st.session_state.get("emails", []):
+                                        _se_cat = (_se.get("category", "informational") or "informational").strip()
+                                        _se_tags = [t.strip() for t in _se_cat.split(",")]
+                                        if new_lb["slug"] in _se_tags:
+                                            continue
+                                        _se_matched = False
+                                        if _match_type == "subject_keyword":
+                                            _se_matched = _match_val in (_se.get("subject") or "").lower()
+                                        elif _match_type == "sender":
+                                            _se_s = (_se.get("sender") or "").lower()
+                                            _se_addr = _se_s.split("<")[1].split(">")[0].strip() if "<" in _se_s and ">" in _se_s else (_se_s.strip() if "@" in _se_s else "")
+                                            _se_matched = _se_addr == _match_val
+                                        elif _match_type == "sender_domain":
+                                            _se_s = (_se.get("sender") or "").lower()
+                                            _se_addr = _se_s.split("<")[1].split(">")[0].strip() if "<" in _se_s and ">" in _se_s else (_se_s.strip() if "@" in _se_s else "")
+                                            if _se_addr and "@" in _se_addr:
+                                                _se_matched = _se_addr.split("@", 1)[1] == _match_val
+                                        if _se_matched:
+                                            _se_main = _se_tags[0] if _se_tags else "informational"
+                                            _se_extras = _se_tags[1:]
+                                            _se["category"] = ",".join([_se_main] + _se_extras + [new_lb["slug"]])
+                                    _msg = f"Created '{prop['proposed_name']}'"
+                                    if _n_updated:
+                                        _msg += f" and applied to {_n_updated} existing email{'s' if _n_updated != 1 else ''}"
+                                    st.success(_msg + ".")
                                     st.session_state["_cat_proposals"].pop(pi)
                                     st.session_state["_cat_proposals_stale"] = True
                                     st.rerun()
@@ -1160,7 +1194,8 @@ with email_col:
         pass
 
     for i, email in enumerate(_page_emails):
-        cat = (email.get("category", "informational") or "informational").strip()
+        cat_raw = (email.get("category", "informational") or "informational").strip()
+        cat_tags = [t.strip() for t in cat_raw.split(",") if t.strip()]
         subject = email.get("subject", "(No subject)")
         sender_raw = email.get("sender", "")
         date_raw = email.get("date", "")
@@ -1182,11 +1217,13 @@ with email_col:
         date_html = html.escape(str(date_simple))
         summary_html = html.escape(str(summary))
 
-        cat_badge = ""
-        _cb_color = _label_color_map.get(cat, "#94a3b8")
-        _cb_display = _label_display_map.get(cat, cat.replace("-", " ").title())
-        cat_badge = f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(_cb_display))}</span>"
-        badges = cat_badge
+        # Build badges — one per tag (system + custom)
+        _badge_parts = []
+        for _tag in cat_tags:
+            _cb_color = _label_color_map.get(_tag, "#94a3b8")
+            _cb_display = _label_display_map.get(_tag, _tag.replace("-", " ").title())
+            _badge_parts.append(f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(_cb_display))}</span>")
+        badges = " ".join(_badge_parts)
 
         # Each email in its own container for CSS targeting
         eid_html = html.escape(str(email.get("id", "")), quote=True)
