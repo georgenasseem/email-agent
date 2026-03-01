@@ -457,7 +457,7 @@ class TestWipeProcessedData:
     def test_wipe_keeps_raw(self):
         raw = _make_email("msg_001")
         store_raw_email(raw)
-        store_processed_email({**raw, "summary": "Test", "category": "normal"})
+        store_processed_email({**raw, "summary": "Test", "category": "informational"})
 
         assert get_processed_count() == 1
         wipe_processed_data()

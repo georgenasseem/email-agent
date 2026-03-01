@@ -639,7 +639,7 @@ filtered = emails
 # Apply category filter if active
 _active_cat_filter = st.session_state.get("_cat_filter")
 if _active_cat_filter:
-    filtered = [e for e in filtered if (e.get("category", "normal") or "normal").strip() == _active_cat_filter]
+    filtered = [e for e in filtered if (e.get("category", "informational") or "informational").strip() == _active_cat_filter]
 
 # Always sort by newest first
 filtered.sort(key=lambda x: x.get("internal_date", 0), reverse=True)
@@ -734,13 +734,13 @@ with draft_col:
         try:
             _enabled_label_options = [lb["slug"] for lb in get_enabled_labels()]
         except Exception:
-            _enabled_label_options = ["important", "informational", "normal", "newsletter"]
+            _enabled_label_options = ["important", "informational", "newsletter"]
 
         _sel_email = st.session_state.get("selected_email_obj")
         if not _sel_email:
             st.markdown("<div class='card-muted'>Select an email to change its category.</div>", unsafe_allow_html=True)
         else:
-            _re_cat_raw = _sel_email.get("category", "normal") or "normal"
+            _re_cat_raw = _sel_email.get("category", "informational") or "informational"
             _re_cat = _re_cat_raw.split(",")[0].strip()
             _re_subj = html.escape(str(_sel_email.get("subject", "(No subject)")))
             _re_sender_raw = _sel_email.get("sender", "")
@@ -817,8 +817,8 @@ with draft_col:
             _sug_container = st.container(key="suggest-cat-wrap")
             with _sug_container:
                 _proposals = st.session_state["_cat_proposals"]
-                # Render in rows of up to 4 columns
-                _row_size = 4
+                # Render in rows of up to 5 columns
+                _row_size = 5
                 for _row_start in range(0, len(_proposals), _row_size):
                     _row_items = _proposals[_row_start:_row_start + _row_size]
                     _cols = st.columns(len(_row_items))
@@ -1157,16 +1157,18 @@ with email_col:
     _page_end = _page_start + _PAGE_SIZE
     _page_emails = filtered[_page_start:_page_end]
 
-    # Pre-load label colors for badges
+    # Pre-load label colors and display names for badges
     _label_color_map = {}
+    _label_display_map = {}
     try:
         for _lb in get_all_labels():
             _label_color_map[_lb["slug"]] = _lb["color"]
+            _label_display_map[_lb["slug"]] = _lb["display_name"]
     except Exception:
         pass
 
     for i, email in enumerate(_page_emails):
-        cat = (email.get("category", "normal") or "normal").strip()
+        cat = (email.get("category", "informational") or "informational").strip()
         subject = email.get("subject", "(No subject)")
         sender_raw = email.get("sender", "")
         date_raw = email.get("date", "")
@@ -1189,9 +1191,9 @@ with email_col:
         summary_html = html.escape(str(summary))
 
         cat_badge = ""
-        if cat != "normal":
-            _cb_color = _label_color_map.get(cat, "#94a3b8")
-            cat_badge = f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(cat))}</span>"
+        _cb_color = _label_color_map.get(cat, "#94a3b8")
+        _cb_display = _label_display_map.get(cat, cat.replace("-", " ").title())
+        cat_badge = f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(_cb_display))}</span>"
         badges = cat_badge
 
         # Each email in its own container for CSS targeting

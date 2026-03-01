@@ -159,7 +159,7 @@ def store_processed_email(email: dict) -> None:
             (
                 gid,
                 email.get("summary", ""),
-                email.get("category", "normal"),
+                email.get("category", "informational"),
                 1 if email.get("needs_action") else 0,
                 options_json,
                 email.get("thread_context", ""),
@@ -186,7 +186,7 @@ def store_processed_emails(emails: List[dict]) -> None:
         rows.append((
             gid,
             e.get("summary", ""),
-            e.get("category", "normal"),
+            e.get("category", "informational"),
             1 if e.get("needs_action") else 0,
             options_json,
             e.get("thread_context", ""),
@@ -682,12 +682,11 @@ def search_emails_for_entity(entity: str, limit: int = 5) -> List[dict]:
 # ─── Custom category labels & rules (Phase 6) ──────────────────────────────
 
 # Default system categories that are always available alongside user labels
-SYSTEM_CATEGORIES = ["important", "informational", "normal", "newsletter"]
+SYSTEM_CATEGORIES = ["important", "informational", "newsletter"]
 
 DEFAULT_LABEL_COLORS = {
     "important": "#f59e0b",
-    "informational": "#64748b",
-    "normal": "#94a3b8",
+    "informational": "#94a3b8",
     "newsletter": "#8b5cf6",
 }
 
@@ -700,31 +699,34 @@ def _slugify(text: str) -> str:
 
 
 def ensure_default_labels() -> None:
-    """Seed the category_labels table with the 4 system categories if needed.
+    """Seed the category_labels table with the 3 system categories if needed.
 
     Handles migration from various legacy systems:
       low → informational
       urgent → important
       action-needed → important
-      fyi → normal
+      fyi → informational
+      normal → informational
     """
     init_db()
     with get_connection() as conn:
         cur = conn.cursor()
 
-        # ── Migrate legacy slugs ──
+        # ── Migrate legacy slugs (labels + rules + emails) ──
         _old_to_new = {
             "low": "informational",
             "urgent": "important",
             "action-needed": "important",
-            "fyi": "normal",
+            "fyi": "informational",
+            "normal": "informational",
         }
         for old_slug, new_slug in _old_to_new.items():
             cur.execute("SELECT slug FROM category_labels WHERE slug = ?", (old_slug,))
             if cur.fetchone():
                 cur.execute("DELETE FROM category_labels WHERE slug = ?", (old_slug,))
-                cur.execute("UPDATE category_rules SET label_slug = ? WHERE label_slug = ?", (new_slug, old_slug))
-                cur.execute("UPDATE email_processed SET category = ? WHERE category = ?", (new_slug, old_slug))
+            # Always migrate rules and emails regardless of whether label row existed
+            cur.execute("UPDATE category_rules SET label_slug = ? WHERE label_slug = ?", (new_slug, old_slug))
+            cur.execute("UPDATE email_processed SET category = ? WHERE category = ?", (new_slug, old_slug))
         conn.commit()
 
         # ── Seed defaults (only on fresh DB — don’t re-create deleted labels) ──
@@ -738,7 +740,6 @@ def ensure_default_labels() -> None:
         defaults = [
             ("important", "Important", DEFAULT_LABEL_COLORS["important"], "Requires a response or task", 1),
             ("informational", "Informational", DEFAULT_LABEL_COLORS["informational"], "Informational only, no action needed", 1),
-            ("normal", "Normal", DEFAULT_LABEL_COLORS["normal"], "Routine, default", 1),
             ("newsletter", "Newsletter", DEFAULT_LABEL_COLORS["newsletter"], "Marketing & newsletters", 1),
         ]
         for i, (slug, display, color, desc, enabled) in enumerate(defaults):
@@ -927,7 +928,7 @@ def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug:
         )
         rows = cur.fetchall()
         for gmail_id, subject, sender, category in rows:
-            category = (category or "normal").strip()
+            category = (category or "informational").strip()
             if category == label_slug:
                 continue
 

@@ -226,7 +226,7 @@ def flag_urgent_node(state: EmailAgentState) -> dict:
 
 
 def postprocess_categories_node(state: EmailAgentState) -> dict:
-    """Promote informational/normal/newsletter → important when the urgent detector flagged needs_action."""
+    """Promote informational/newsletter → important when the urgent detector flagged needs_action."""
     emails = state.get("emails") or []
     if not emails:
         return {}
@@ -236,13 +236,13 @@ def postprocess_categories_node(state: EmailAgentState) -> dict:
         from agent.email_memory import get_enabled_labels
         _enabled = {lb["slug"] for lb in get_enabled_labels()}
     except Exception:
-        _enabled = {"important", "informational", "normal", "newsletter"}
+        _enabled = {"important", "informational", "newsletter"}
 
     for e in emails:
         if not e.get("needs_action", False):
             continue
-        cat = (e.get("category") or "normal").lower()
-        if cat in ("informational", "normal", "newsletter"):
+        cat = (e.get("category") or "informational").lower()
+        if cat in ("informational", "newsletter"):
             # Promote to important if it's enabled
             if "important" in _enabled:
                 e["category"] = "important"

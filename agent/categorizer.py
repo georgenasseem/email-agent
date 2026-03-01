@@ -5,7 +5,7 @@ from langchain_core.output_parsers import StrOutputParser
 from agent.llm import get_llm
 from agent.email_memory import build_memory_context, match_rules_for_email, get_enabled_labels
 
-CATEGORIES = ["important", "informational", "normal", "newsletter"]
+CATEGORIES = ["important", "informational", "newsletter"]
 
 
 def _get_valid_categories() -> list[str]:
@@ -85,7 +85,7 @@ def categorize_email(email: dict) -> dict:
         pass
 
     # ── 2. Run newsletter heuristics BEFORE LLM to save a call ──
-    heuristic_cat = _apply_newsletter_heuristics(email, "normal")
+    heuristic_cat = _apply_newsletter_heuristics(email, "informational")
     if heuristic_cat == "newsletter":
         return {**email, "category": "newsletter"}
 
@@ -111,8 +111,7 @@ def categorize_email(email: dict) -> dict:
     # Build dynamic category descriptions for enabled system categories only
     _cat_descriptions = {
         "important": "- important: Requires a response, decision, or task. Requests, approvals, deadlines, questions directed at you.",
-        "informational": "- informational: Informational only, no action needed. Updates, announcements, event listings, general FYI.",
-        "normal": "- normal: Routine. Confirmations, reminders, meeting updates, coordination. Default when unsure.",
+        "informational": "- informational: Informational only, no action needed. Updates, announcements, event listings, general FYI, routine confirmations, reminders, meeting updates.",
         "newsletter": "- newsletter: Marketing, newsletters, promotions, unsubscribe links, mass mailings.",
     }
     _enabled_sys_cats = [c for c in CATEGORIES if c in valid_cats]
@@ -134,8 +133,7 @@ MAIN CATEGORIES (use exactly these words):
 
 CRITICAL:
 - "newsletter": Newsletters, marketing, promotions, "click here", tracking pixels, noreply senders.
-- "informational": Announcements, event listings, no reply needed.
-- "normal": Default. Routine confirmations, reminders, meeting updates.
+- "informational": Announcements, event listings, routine confirmations, reminders, meeting updates, no reply needed. Default when unsure.
 - "important": The sender expects YOU to do something — reply, approve, complete a task.
 
 Output ONLY the category slug (or main,extra if an additional tag applies)."""
@@ -187,13 +185,13 @@ Category (one word only):"""
                 main_cat = c
                 break
         else:
-            main_cat = "normal"
+            main_cat = "informational"
 
     # Ensure main_cat is a system category
     if main_cat not in CATEGORIES:
-        # main_cat is a user label — swap it to extra and default main to normal
+        # main_cat is a user label — swap it to extra and default main to informational
         extra_cat = main_cat
-        main_cat = "normal"
+        main_cat = "informational"
 
     # Validate extra category (must be a user-defined label, not a system category)
     if extra_cat:

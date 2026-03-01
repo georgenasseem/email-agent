@@ -101,7 +101,7 @@ class TestSchema:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestDefaultLabels:
-    def test_ensure_default_labels_creates_4(self):
+    def test_ensure_default_labels_creates_3(self):
         ensure_default_labels()
         labels = get_all_labels()
         slugs = [lb["slug"] for lb in labels]
@@ -112,7 +112,7 @@ class TestDefaultLabels:
         ensure_default_labels()
         ensure_default_labels()
         labels = get_all_labels()
-        assert len(labels) == 4
+        assert len(labels) == 3
 
     def test_default_labels_have_colors(self):
         ensure_default_labels()
@@ -141,7 +141,7 @@ class TestLabelCRUD:
     def test_create_label_sets_position(self):
         ensure_default_labels()
         lb = create_label("Advising")
-        assert lb["position"] == 4  # after the 4 defaults (0-3)
+        assert lb["position"] == 3  # after the 3 defaults (0-2)
 
     def test_create_label_slugifies(self):
         ensure_default_labels()
@@ -171,8 +171,8 @@ class TestLabelCRUD:
 
     def test_update_label_color(self):
         ensure_default_labels()
-        update_label("normal", color="#000000")
-        lb = get_label_by_slug("normal")
+        update_label("informational", color="#000000")
+        lb = get_label_by_slug("informational")
         assert lb["color"] == "#000000"
 
     def test_update_label_enabled(self):
@@ -203,10 +203,10 @@ class TestLabelCRUD:
 
     def test_get_enabled_labels_excludes_hidden(self):
         ensure_default_labels()
-        update_label("normal", enabled=0)
+        update_label("informational", enabled=0)
         enabled = get_enabled_labels()
         slugs = [lb["slug"] for lb in enabled]
-        assert "normal" not in slugs
+        assert "informational" not in slugs
         assert "important" in slugs
 
 
@@ -229,9 +229,9 @@ class TestLabelMerge:
 
     def test_merge_system_into_system_disables_source(self):
         ensure_default_labels()
-        upsert_rule("sender", "news@example.com", "normal")
-        merge_labels("normal", "newsletter")
-        lb = get_label_by_slug("normal")
+        upsert_rule("sender", "news@example.com", "informational")
+        merge_labels("informational", "newsletter")
+        lb = get_label_by_slug("informational")
         assert lb is not None  # not deleted (system)
         assert lb["enabled"] == 0  # but disabled
 
@@ -327,7 +327,7 @@ class TestRuleMatching:
     def test_keyword_takes_priority_over_domain(self):
         ensure_default_labels()
         upsert_rule("subject_keyword", "hello", "important")
-        upsert_rule("sender_domain", "example.com", "normal")
+        upsert_rule("sender_domain", "example.com", "informational")
         assert match_rules_for_email(self._email()) == "important"
 
     def test_sender_takes_priority_over_domain(self):
@@ -343,8 +343,8 @@ class TestRuleMatching:
 
     def test_disabled_label_not_matched(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "normal")
-        update_label("normal", enabled=0)
+        upsert_rule("sender", "alice@example.com", "informational")
+        update_label("informational", enabled=0)
         assert match_rules_for_email(self._email()) is None
 
 
@@ -358,7 +358,7 @@ class TestCategoryOverride:
         email = {"id": "msg1", "sender": "Bob <bob@company.com>", "subject": "Meeting invitation tomorrow"}
         # Store as raw + processed so the UPDATE works
         store_raw_email({"id": "msg1", "thread_id": "t1", "subject": "Meeting invitation tomorrow", "sender": "Bob <bob@company.com>", "date": "", "body": "", "snippet": ""})
-        store_processed_email({"id": "msg1", "category": "normal"})
+        store_processed_email({"id": "msg1", "category": "informational"})
         record_category_override(email, "important")
         rules = get_all_rules()
         # Should create keyword rules from subject, not sender rules
@@ -371,7 +371,7 @@ class TestCategoryOverride:
     def test_override_updates_processed_in_db(self):
         ensure_default_labels()
         store_raw_email({"id": "msg2", "thread_id": "t2", "subject": "X", "sender": "x@y.com", "date": "", "body": "", "snippet": ""})
-        store_processed_email({"id": "msg2", "category": "normal"})
+        store_processed_email({"id": "msg2", "category": "informational"})
         record_category_override({"id": "msg2", "sender": "x@y.com"}, "important")
         with get_connection() as conn:
             cur = conn.cursor()
@@ -382,7 +382,7 @@ class TestCategoryOverride:
         """After override, future emails with similar subject keywords should match."""
         ensure_default_labels()
         store_raw_email({"id": "msg3", "thread_id": "t3", "subject": "Invoice payment due", "sender": "q@r.com", "date": "", "body": "", "snippet": ""})
-        store_processed_email({"id": "msg3", "category": "normal"})
+        store_processed_email({"id": "msg3", "category": "informational"})
         record_category_override({"id": "msg3", "sender": "q@r.com", "subject": "Invoice payment due"}, "newsletter")
         # Now a new email with same keyword should match
         new_email = {"id": "msg4", "sender": "different@other.com", "subject": "New invoice attached"}
@@ -425,11 +425,11 @@ class TestCategorizerIntegration:
                 chain_mock.invoke.return_value = "advising"
                 mock_llm_instance.__or__.return_value = chain_mock
                 result = categorize_email(email)
-                # User label as extra tag: "normal,advising"
-                assert result["category"] == "normal,advising"
+                # User label as extra tag: "informational,advising"
+                assert result["category"] == "informational,advising"
 
-    def test_falls_back_to_normal_on_bad_llm(self):
-        """Unknown LLM output falls back to 'normal'."""
+    def test_falls_back_to_informational_on_bad_llm(self):
+        """Unknown LLM output falls back to 'informational'."""
         ensure_default_labels()
         email = {"id": "e3", "sender": "a@b.com", "subject": "Test", "body": "x"}
 
@@ -441,7 +441,7 @@ class TestCategorizerIntegration:
 
         with patch("agent.categorizer.get_llm", return_value=mock_llm_instance):
             result = categorize_email(email)
-            assert result["category"] == "normal"
+            assert result["category"] == "informational"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -512,8 +512,8 @@ class TestEdgeCases:
         """Override with email missing subject should not crash."""
         ensure_default_labels()
         store_raw_email({"id": "nosender", "thread_id": "t", "subject": "", "sender": "", "date": "", "body": "", "snippet": ""})
-        store_processed_email({"id": "nosender", "category": "normal"})
-        record_category_override({"id": "nosender", "sender": "", "subject": ""}, "normal")
+        store_processed_email({"id": "nosender", "category": "informational"})
+        record_category_override({"id": "nosender", "sender": "", "subject": ""}, "informational")
         # No rule should be created (no meaningful keywords)
         assert len(get_all_rules()) == 0
 
@@ -535,7 +535,7 @@ class TestApplyRuleToExistingEmails:
         # Store two emails — one matching, one not
         store_raw_email({"id": "e1", "thread_id": "t1", "subject": "Hackathon Registration",
                          "sender": "a@x.com", "date": "Mon, 1 Jan 2026", "body": "", "snippet": ""})
-        store_processed_email({"id": "e1", "category": "normal"})
+        store_processed_email({"id": "e1", "category": "informational"})
         store_raw_email({"id": "e2", "thread_id": "t2", "subject": "Meeting Tomorrow",
                          "sender": "b@x.com", "date": "Mon, 1 Jan 2026", "body": "", "snippet": ""})
         store_processed_email({"id": "e2", "category": "important"})
