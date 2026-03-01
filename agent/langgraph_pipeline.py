@@ -29,7 +29,7 @@ from agent.summarizer import summarize_batch
 from agent.categorizer import categorize_emails
 from agent.urgent_detector import flag_urgent_emails
 from agent.decision_suggester import suggest_decision
-from agent.quick_actions_graph import suggest_quick_actions
+from agent.quick_actions_graph import suggest_quick_actions_full
 from agent.delegation import decide_delegation
 from agent.context_enrichment import enrich_batch
 
@@ -277,9 +277,13 @@ def suggest_decision_node(state: EmailAgentState) -> dict:
         return {}
     for e in emails:
         try:
-            options = suggest_quick_actions(e)
+            result = suggest_quick_actions_full(e)
+            options = result.get("final_options", [])
             if options:
                 e["decision_options"] = options
+            no_action = result.get("no_action_message", "")
+            if no_action:
+                e["no_action_message"] = no_action
         except Exception:
             continue
     return {"emails": emails}

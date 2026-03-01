@@ -942,9 +942,7 @@ with draft_col:
                         return (1, o)
                     elif o.startswith("Todo:"):
                         return (2, o)
-                    elif o.startswith("Archive:"):
-                        return (3, o)
-                    return (4, o)
+                    return (3, o)
                 options = sorted(options, key=_qa_sort_key)
 
                 st.markdown("**Quick actions**")
@@ -968,17 +966,6 @@ with draft_col:
                                     except Exception as e:
                                         st.error(f"Error drafting reply: {str(e)}")
                                 st.rerun()
-                    elif opt.startswith("Archive:"):
-                        with st.container(key=f"qa-archive-{eid}-{j}"):
-                            if st.button(opt, key=f"qa_{eid}_{j}", use_container_width=True):
-                                _arc_id = email.get("id", "")
-                                archive_email(_arc_id)
-                                mark_email_archived(_arc_id)
-                                st.session_state["emails"] = [e for e in st.session_state.get("emails", []) if e.get("id") != _arc_id]
-                                st.session_state.pop("selected_email", None)
-                                st.session_state.pop("selected_email_obj", None)
-                                st.success("Archived.")
-                                st.rerun()
                     elif opt.startswith("Todo:"):
                         with st.container(key=f"qa-todo-{eid}-{j}"):
                             if st.button(opt, key=f"qa_{eid}_{j}", use_container_width=True):
@@ -992,6 +979,11 @@ with draft_col:
                                 st.session_state[f"schedule_pending_{eid}"] = True
                                 st.session_state[f"schedule_desc_{eid}"] = opt[len("Schedule:"):].strip()
                                 st.rerun()
+            else:
+                # No quick actions — show muted message if available
+                no_action_msg = email.get("no_action_message", "")
+                if no_action_msg:
+                    st.markdown(f'<p style="color:#999;font-style:italic;">{no_action_msg}</p>', unsafe_allow_html=True)
 
             # ── Scheduling flow (triggered by Schedule: action) ──────
             if st.session_state.get(f"schedule_pending_{eid}"):
