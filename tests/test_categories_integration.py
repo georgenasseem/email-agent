@@ -101,7 +101,7 @@ class TestSchema:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestDefaultLabels:
-    def test_ensure_default_labels_creates_3(self):
+    def test_ensure_default_labels_creates_4(self):
         ensure_default_labels()
         labels = get_all_labels()
         slugs = [lb["slug"] for lb in labels]
@@ -112,7 +112,7 @@ class TestDefaultLabels:
         ensure_default_labels()
         ensure_default_labels()
         labels = get_all_labels()
-        assert len(labels) == 3
+        assert len(labels) == 4
 
     def test_default_labels_have_colors(self):
         ensure_default_labels()
@@ -141,7 +141,7 @@ class TestLabelCRUD:
     def test_create_label_sets_position(self):
         ensure_default_labels()
         lb = create_label("Advising")
-        assert lb["position"] == 3  # after the 3 defaults (0-2)
+        assert lb["position"] == 4  # after the 4 defaults (0-3)
 
     def test_create_label_slugifies(self):
         ensure_default_labels()
@@ -155,9 +155,9 @@ class TestLabelCRUD:
 
     def test_get_label_by_slug(self):
         ensure_default_labels()
-        lb = get_label_by_slug("action-needed")
+        lb = get_label_by_slug("important")
         assert lb is not None
-        assert lb["display_name"] == "Action Needed"
+        assert lb["display_name"] == "Important"
 
     def test_get_label_by_slug_missing(self):
         ensure_default_labels()
@@ -165,14 +165,14 @@ class TestLabelCRUD:
 
     def test_update_label_display_name(self):
         ensure_default_labels()
-        update_label("action-needed", display_name="ACTION!!")
-        lb = get_label_by_slug("action-needed")
-        assert lb["display_name"] == "ACTION!!"
+        update_label("important", display_name="URGENT!!")
+        lb = get_label_by_slug("important")
+        assert lb["display_name"] == "URGENT!!"
 
     def test_update_label_color(self):
         ensure_default_labels()
-        update_label("fyi", color="#000000")
-        lb = get_label_by_slug("fyi")
+        update_label("normal", color="#000000")
+        lb = get_label_by_slug("normal")
         assert lb["color"] == "#000000"
 
     def test_update_label_enabled(self):
@@ -187,18 +187,27 @@ class TestLabelCRUD:
         delete_label("temp")
         assert get_label_by_slug("temp") is None
 
-    def test_delete_system_label_allowed(self):
+    def test_delete_system_label_recreated(self):
+        """System labels are re-seeded by ensure_default_labels even after deletion."""
         ensure_default_labels()
-        delete_label("action-needed")
-        assert get_label_by_slug("action-needed") is None
+        delete_label("important")
+        # get_label_by_slug calls ensure_default_labels internally, which re-creates it
+        # Verify via direct DB query that it was deleted
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT slug FROM category_labels WHERE slug = 'important'")
+            assert cur.fetchone() is None
+        # But ensure_default_labels re-creates it
+        ensure_default_labels()
+        assert get_label_by_slug("important") is not None
 
     def test_get_enabled_labels_excludes_hidden(self):
         ensure_default_labels()
-        update_label("fyi", enabled=0)
+        update_label("normal", enabled=0)
         enabled = get_enabled_labels()
         slugs = [lb["slug"] for lb in enabled]
-        assert "fyi" not in slugs
-        assert "action-needed" in slugs
+        assert "normal" not in slugs
+        assert "important" in slugs
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -210,25 +219,25 @@ class TestLabelMerge:
         ensure_default_labels()
         create_label("Finance")
         upsert_rule("sender", "bank@example.com", "finance")
-        changed = merge_labels("finance", "action-needed")
+        changed = merge_labels("finance", "important")
         assert changed == 1
         # finance label should be deleted
         assert get_label_by_slug("finance") is None
-        # rule should now point to action-needed
+        # rule should now point to important
         rules = get_all_rules()
-        assert rules[0]["label_slug"] == "action-needed"
+        assert rules[0]["label_slug"] == "important"
 
     def test_merge_system_into_system_disables_source(self):
         ensure_default_labels()
-        upsert_rule("sender", "news@example.com", "fyi")
-        merge_labels("fyi", "newsletter")
-        lb = get_label_by_slug("fyi")
+        upsert_rule("sender", "news@example.com", "normal")
+        merge_labels("normal", "newsletter")
+        lb = get_label_by_slug("normal")
         assert lb is not None  # not deleted (system)
         assert lb["enabled"] == 0  # but disabled
 
     def test_merge_same_slug_noop(self):
         ensure_default_labels()
-        assert merge_labels("action-needed", "action-needed") == 0
+        assert merge_labels("important", "important") == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -238,30 +247,30 @@ class TestLabelMerge:
 class TestRulesCRUD:
     def test_upsert_creates_rule(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "action-needed")
+        upsert_rule("sender", "alice@example.com", "important")
         rules = get_all_rules()
         assert len(rules) == 1
         assert rules[0]["match_value"] == "alice@example.com"
-        assert rules[0]["label_slug"] == "action-needed"
+        assert rules[0]["label_slug"] == "important"
         assert rules[0]["hits"] == 1
 
     def test_upsert_increments_hits(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "action-needed")
-        upsert_rule("sender", "alice@example.com", "action-needed")
+        upsert_rule("sender", "alice@example.com", "important")
+        upsert_rule("sender", "alice@example.com", "important")
         rules = get_all_rules()
         assert rules[0]["hits"] == 2
 
     def test_upsert_updates_label(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "action-needed")
+        upsert_rule("sender", "alice@example.com", "important")
         upsert_rule("sender", "alice@example.com", "newsletter")
         rules = get_all_rules()
         assert rules[0]["label_slug"] == "newsletter"
 
     def test_delete_rule(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "action-needed")
+        upsert_rule("sender", "alice@example.com", "important")
         rules = get_all_rules()
         delete_rule(rules[0]["id"])
         assert len(get_all_rules()) == 0
@@ -274,7 +283,7 @@ class TestRulesCRUD:
 
     def test_subject_keyword_rule(self):
         ensure_default_labels()
-        upsert_rule("subject_keyword", "invoice", "action-needed")
+        upsert_rule("subject_keyword", "invoice", "important")
         rules = get_all_rules()
         assert rules[0]["match_type"] == "subject_keyword"
 
@@ -289,14 +298,14 @@ class TestRuleMatching:
 
     def test_sender_exact_match(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "action-needed")
-        assert match_rules_for_email(self._email()) == "action-needed"
+        upsert_rule("sender", "alice@example.com", "important")
+        assert match_rules_for_email(self._email()) == "important"
 
     def test_sender_in_angle_brackets(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "action-needed")
+        upsert_rule("sender", "alice@example.com", "important")
         email = self._email(sender="Alice Smith <alice@example.com>")
-        assert match_rules_for_email(email) == "action-needed"
+        assert match_rules_for_email(email) == "important"
 
     def test_domain_match(self):
         ensure_default_labels()
@@ -305,28 +314,28 @@ class TestRuleMatching:
 
     def test_subject_keyword_match(self):
         ensure_default_labels()
-        upsert_rule("subject_keyword", "invoice", "action-needed")
+        upsert_rule("subject_keyword", "invoice", "important")
         email = self._email(subject="Your invoice is ready")
-        assert match_rules_for_email(email) == "action-needed"
+        assert match_rules_for_email(email) == "important"
 
     def test_keyword_takes_priority_over_sender(self):
         ensure_default_labels()
-        upsert_rule("subject_keyword", "hello", "action-needed")
+        upsert_rule("subject_keyword", "hello", "important")
         upsert_rule("sender", "alice@example.com", "newsletter")
-        assert match_rules_for_email(self._email()) == "action-needed"
+        assert match_rules_for_email(self._email()) == "important"
 
     def test_keyword_takes_priority_over_domain(self):
         ensure_default_labels()
-        upsert_rule("subject_keyword", "hello", "action-needed")
-        upsert_rule("sender_domain", "example.com", "fyi")
-        assert match_rules_for_email(self._email()) == "action-needed"
+        upsert_rule("subject_keyword", "hello", "important")
+        upsert_rule("sender_domain", "example.com", "normal")
+        assert match_rules_for_email(self._email()) == "important"
 
     def test_sender_takes_priority_over_domain(self):
         """When no keyword matches, sender > domain."""
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "action-needed")
+        upsert_rule("sender", "alice@example.com", "important")
         upsert_rule("sender_domain", "example.com", "newsletter")
-        assert match_rules_for_email(self._email()) == "action-needed"
+        assert match_rules_for_email(self._email()) == "important"
 
     def test_no_match_returns_none(self):
         ensure_default_labels()
@@ -334,8 +343,8 @@ class TestRuleMatching:
 
     def test_disabled_label_not_matched(self):
         ensure_default_labels()
-        upsert_rule("sender", "alice@example.com", "fyi")
-        update_label("fyi", enabled=0)
+        upsert_rule("sender", "alice@example.com", "normal")
+        update_label("normal", enabled=0)
         assert match_rules_for_email(self._email()) is None
 
 
@@ -349,31 +358,31 @@ class TestCategoryOverride:
         email = {"id": "msg1", "sender": "Bob <bob@company.com>", "subject": "Meeting invitation tomorrow"}
         # Store as raw + processed so the UPDATE works
         store_raw_email({"id": "msg1", "thread_id": "t1", "subject": "Meeting invitation tomorrow", "sender": "Bob <bob@company.com>", "date": "", "body": "", "snippet": ""})
-        store_processed_email({"id": "msg1", "category": "fyi"})
-        record_category_override(email, "action-needed")
+        store_processed_email({"id": "msg1", "category": "normal"})
+        record_category_override(email, "important")
         rules = get_all_rules()
         # Should create keyword rules from subject, not sender rules
         assert len(rules) >= 1
         assert all(r["match_type"] == "subject_keyword" for r in rules)
         keywords = [r["match_value"] for r in rules]
         assert "meeting" in keywords
-        assert all(r["label_slug"] == "action-needed" for r in rules)
+        assert all(r["label_slug"] == "important" for r in rules)
 
     def test_override_updates_processed_in_db(self):
         ensure_default_labels()
         store_raw_email({"id": "msg2", "thread_id": "t2", "subject": "X", "sender": "x@y.com", "date": "", "body": "", "snippet": ""})
-        store_processed_email({"id": "msg2", "category": "fyi"})
-        record_category_override({"id": "msg2", "sender": "x@y.com"}, "action-needed")
+        store_processed_email({"id": "msg2", "category": "normal"})
+        record_category_override({"id": "msg2", "sender": "x@y.com"}, "important")
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute("SELECT category FROM email_processed WHERE gmail_id = 'msg2'")
-            assert cur.fetchone()[0] == "action-needed"
+            assert cur.fetchone()[0] == "important"
 
     def test_override_then_match(self):
         """After override, future emails with similar subject keywords should match."""
         ensure_default_labels()
         store_raw_email({"id": "msg3", "thread_id": "t3", "subject": "Invoice payment due", "sender": "q@r.com", "date": "", "body": "", "snippet": ""})
-        store_processed_email({"id": "msg3", "category": "fyi"})
+        store_processed_email({"id": "msg3", "category": "normal"})
         record_category_override({"id": "msg3", "sender": "q@r.com", "subject": "Invoice payment due"}, "newsletter")
         # Now a new email with same keyword should match
         new_email = {"id": "msg4", "sender": "different@other.com", "subject": "New invoice attached"}
@@ -416,10 +425,11 @@ class TestCategorizerIntegration:
                 chain_mock.invoke.return_value = "advising"
                 mock_llm_instance.__or__.return_value = chain_mock
                 result = categorize_email(email)
-                assert result["category"] == "advising"
+                # User label as extra tag: "normal,advising"
+                assert result["category"] == "normal,advising"
 
-    def test_falls_back_to_fyi_on_bad_llm(self):
-        """Unknown LLM output falls back to 'fyi'."""
+    def test_falls_back_to_normal_on_bad_llm(self):
+        """Unknown LLM output falls back to 'normal'."""
         ensure_default_labels()
         email = {"id": "e3", "sender": "a@b.com", "subject": "Test", "body": "x"}
 
@@ -431,7 +441,7 @@ class TestCategorizerIntegration:
 
         with patch("agent.categorizer.get_llm", return_value=mock_llm_instance):
             result = categorize_email(email)
-            assert result["category"] == "fyi"
+            assert result["category"] == "normal"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -457,7 +467,7 @@ class TestProposals:
 
     def test_propose_skips_existing_rules(self):
         ensure_default_labels()
-        upsert_rule("subject_keyword", "report", "action-needed")
+        upsert_rule("subject_keyword", "report", "important")
         for i in range(3):
             store_raw_email({
                 "id": f"prop2_{i}", "thread_id": f"t{i}",
@@ -502,8 +512,8 @@ class TestEdgeCases:
         """Override with email missing subject should not crash."""
         ensure_default_labels()
         store_raw_email({"id": "nosender", "thread_id": "t", "subject": "", "sender": "", "date": "", "body": "", "snippet": ""})
-        store_processed_email({"id": "nosender", "category": "fyi"})
-        record_category_override({"id": "nosender", "sender": "", "subject": ""}, "fyi")
+        store_processed_email({"id": "nosender", "category": "normal"})
+        record_category_override({"id": "nosender", "sender": "", "subject": ""}, "normal")
         # No rule should be created (no meaningful keywords)
         assert len(get_all_rules()) == 0
 
@@ -525,10 +535,10 @@ class TestApplyRuleToExistingEmails:
         # Store two emails — one matching, one not
         store_raw_email({"id": "e1", "thread_id": "t1", "subject": "Hackathon Registration",
                          "sender": "a@x.com", "date": "Mon, 1 Jan 2026", "body": "", "snippet": ""})
-        store_processed_email({"id": "e1", "category": "fyi"})
+        store_processed_email({"id": "e1", "category": "normal"})
         store_raw_email({"id": "e2", "thread_id": "t2", "subject": "Meeting Tomorrow",
                          "sender": "b@x.com", "date": "Mon, 1 Jan 2026", "body": "", "snippet": ""})
-        store_processed_email({"id": "e2", "category": "action-needed"})
+        store_processed_email({"id": "e2", "category": "important"})
         updated = apply_rule_to_existing_emails("subject_keyword", "hackathon", "hackathon")
         assert updated == 1
         # Verify e1 category is replaced (single-category model)

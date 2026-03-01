@@ -5,7 +5,7 @@ from langchain_core.output_parsers import StrOutputParser
 from agent.llm import get_llm
 from agent.email_memory import build_memory_context, match_rules_for_email, get_enabled_labels
 
-CATEGORIES = ["action-needed", "fyi", "newsletter"]
+CATEGORIES = ["important", "informational", "normal", "newsletter"]
 
 
 def _get_valid_categories() -> list[str]:
@@ -85,7 +85,7 @@ def categorize_email(email: dict) -> dict:
         pass
 
     # ── 2. Run newsletter heuristics BEFORE LLM to save a call ──
-    heuristic_cat = _apply_newsletter_heuristics(email, "fyi")
+    heuristic_cat = _apply_newsletter_heuristics(email, "normal")
     if heuristic_cat == "newsletter":
         return {**email, "category": "newsletter"}
 
@@ -110,8 +110,9 @@ def categorize_email(email: dict) -> dict:
 
     # Build dynamic category descriptions for enabled system categories only
     _cat_descriptions = {
-        "action-needed": "- action-needed: Requires a response, decision, or task. Requests, approvals, deadlines, questions, action items.",
-        "fyi": "- fyi: Informational only, no action needed. Updates, confirmations, reminders, FYI, routine. Default when unsure.",
+        "important": "- important: Requires a response, decision, or task. Requests, approvals, deadlines, questions directed at you.",
+        "informational": "- informational: Informational only, no action needed. Updates, announcements, event listings, general FYI.",
+        "normal": "- normal: Routine. Confirmations, reminders, meeting updates, coordination. Default when unsure.",
         "newsletter": "- newsletter: Marketing, newsletters, promotions, unsubscribe links, mass mailings.",
     }
     _enabled_sys_cats = [c for c in CATEGORIES if c in valid_cats]
@@ -121,17 +122,23 @@ def categorize_email(email: dict) -> dict:
     llm = get_llm(task="categorize")
     parser = StrOutputParser()
 
-    system = f"""You are an email triage specialist. Assign ONE category for this email.
+    # If user-defined labels exist, the LLM can also assign ONE extra tag
+    _extra_instruction = ""
+    if user_labels_block:
+        _extra_instruction = "\n\nYou may OPTIONALLY add a second tag from the ADDITIONAL categories if it clearly fits. Format: main_category,extra_tag (e.g. important,hackathon). Only add the extra tag if it is a strong match."
 
-CATEGORIES (use exactly these words):
-{_cat_block}{user_labels_block}
+    system = f"""You are an email triage specialist. Assign ONE main category for this email.
+
+MAIN CATEGORIES (use exactly these words):
+{_cat_block}{user_labels_block}{_extra_instruction}
 
 CRITICAL:
 - "newsletter": Newsletters, marketing, promotions, "click here", tracking pixels, noreply senders.
-- "fyi": Default. Confirmations, routine updates, event listings, no reply needed.
-- "action-needed": The sender expects YOU to do something — reply, approve, complete a task.
+- "informational": Announcements, event listings, no reply needed.
+- "normal": Default. Routine confirmations, reminders, meeting updates.
+- "important": The sender expects YOU to do something — reply, approve, complete a task.
 
-Output ONLY one category slug from the list above."""
+Output ONLY the category slug (or main,extra if an additional tag applies)."""
 
     preview = _build_preview(email)
     thread_ctx = (email.get("thread_context") or "")[:300]
@@ -167,16 +174,34 @@ Category (one word only):"""
     cat = (raw or "").strip().lower()
 
     # Normalize and validate – accept system + user-defined slugs
-    if cat not in valid_cats:
-        # Try to recover from phrases like "Category: action-needed"
-        for c in valid_cats:
-            if c in cat:
-                cat = c
+    # LLM may return "main,extra" format
+    parts = [p.strip() for p in cat.split(",") if p.strip()]
+    main_cat = parts[0] if parts else ""
+    extra_cat = parts[1] if len(parts) > 1 else None
+
+    # Validate main category
+    if main_cat not in valid_cats:
+        # Try to recover from phrases like "Category: important"
+        for c in CATEGORIES:
+            if c in main_cat:
+                main_cat = c
                 break
         else:
-            cat = "fyi"
+            main_cat = "normal"
 
-    return {**email, "category": cat}
+    # Ensure main_cat is a system category
+    if main_cat not in CATEGORIES:
+        # main_cat is a user label — swap it to extra and default main to normal
+        extra_cat = main_cat
+        main_cat = "normal"
+
+    # Validate extra category (must be a user-defined label, not a system category)
+    if extra_cat:
+        if extra_cat in CATEGORIES or extra_cat not in valid_cats:
+            extra_cat = None
+
+    final_cat = f"{main_cat},{extra_cat}" if extra_cat else main_cat
+    return {**email, "category": final_cat}
 
 
 def categorize_emails(emails: list[dict]) -> list[dict]:

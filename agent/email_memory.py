@@ -159,7 +159,7 @@ def store_processed_email(email: dict) -> None:
             (
                 gid,
                 email.get("summary", ""),
-                email.get("category", "fyi"),
+                email.get("category", "normal"),
                 1 if email.get("needs_action") else 0,
                 options_json,
                 email.get("thread_context", ""),
@@ -186,7 +186,7 @@ def store_processed_emails(emails: List[dict]) -> None:
         rows.append((
             gid,
             e.get("summary", ""),
-            e.get("category", "fyi"),
+            e.get("category", "normal"),
             1 if e.get("needs_action") else 0,
             options_json,
             e.get("thread_context", ""),
@@ -682,11 +682,12 @@ def search_emails_for_entity(entity: str, limit: int = 5) -> List[dict]:
 # ─── Custom category labels & rules (Phase 6) ──────────────────────────────
 
 # Default system categories that are always available alongside user labels
-SYSTEM_CATEGORIES = ["action-needed", "fyi", "newsletter"]
+SYSTEM_CATEGORIES = ["important", "informational", "normal", "newsletter"]
 
 DEFAULT_LABEL_COLORS = {
-    "action-needed": "#f59e0b",
-    "fyi": "#94a3b8",
+    "important": "#f59e0b",
+    "informational": "#64748b",
+    "normal": "#94a3b8",
     "newsletter": "#8b5cf6",
 }
 
@@ -699,32 +700,24 @@ def _slugify(text: str) -> str:
 
 
 def ensure_default_labels() -> None:
-    """Seed the category_labels table with the 3 system categories if needed.
+    """Seed the category_labels table with the 4 system categories if needed.
 
-    Handles migration from the legacy 5-category system:
-      urgent / important  →  action-needed
-      normal / informational  →  fyi
-      newsletter  →  newsletter  (unchanged)
-    Also handles the older 'low' → 'fyi' migration.
+    Handles migration from various legacy systems:
+      low → informational
+      urgent → important
+      action-needed → important
+      fyi → normal
     """
     init_db()
     with get_connection() as conn:
         cur = conn.cursor()
 
-        # ── Legacy migration: "low" → "fyi" ──
-        cur.execute("SELECT slug FROM category_labels WHERE slug = 'low'")
-        if cur.fetchone():
-            cur.execute("DELETE FROM category_labels WHERE slug = 'low'")
-            cur.execute("UPDATE category_rules SET label_slug = 'fyi' WHERE label_slug = 'low'")
-            cur.execute("UPDATE email_processed SET category = 'fyi' WHERE category = 'low'")
-            conn.commit()
-
-        # ── Migrate 5-category → 3-category ──
+        # ── Migrate legacy slugs ──
         _old_to_new = {
-            "urgent": "action-needed",
-            "important": "action-needed",
-            "normal": "fyi",
-            "informational": "fyi",
+            "low": "informational",
+            "urgent": "important",
+            "action-needed": "important",
+            "fyi": "normal",
         }
         for old_slug, new_slug in _old_to_new.items():
             cur.execute("SELECT slug FROM category_labels WHERE slug = ?", (old_slug,))
@@ -734,19 +727,27 @@ def ensure_default_labels() -> None:
                 cur.execute("UPDATE email_processed SET category = ? WHERE category = ?", (new_slug, old_slug))
         conn.commit()
 
-        # ── Seed defaults (only on fresh DB — don't re-create deleted labels) ──
+        # ── Seed defaults (only on fresh DB — don’t re-create deleted labels) ──
         cur.execute("SELECT COUNT(*) FROM category_labels")
-        if cur.fetchone()[0] > 0:
-            return
+        _has_labels = cur.fetchone()[0] > 0
+
+        # ── Always ensure system categories exist ──
+        cur.execute("SELECT MAX(position) FROM category_labels")
+        _max_pos_row = cur.fetchone()
+        _next_pos = (_max_pos_row[0] or -1) + 1 if _max_pos_row and _max_pos_row[0] is not None else 0
         defaults = [
-            ("action-needed", "Action Needed", DEFAULT_LABEL_COLORS["action-needed"], "Requires a response or task", 1, 0),
-            ("fyi", "FYI", DEFAULT_LABEL_COLORS["fyi"], "Informational, no action needed", 1, 1),
-            ("newsletter", "Newsletter", DEFAULT_LABEL_COLORS["newsletter"], "Marketing & newsletters", 1, 2),
+            ("important", "Important", DEFAULT_LABEL_COLORS["important"], "Requires a response or task", 1),
+            ("informational", "Informational", DEFAULT_LABEL_COLORS["informational"], "Informational only, no action needed", 1),
+            ("normal", "Normal", DEFAULT_LABEL_COLORS["normal"], "Routine, default", 1),
+            ("newsletter", "Newsletter", DEFAULT_LABEL_COLORS["newsletter"], "Marketing & newsletters", 1),
         ]
-        cur.executemany(
-            "INSERT OR IGNORE INTO category_labels (slug, display_name, color, description, enabled, position) VALUES (?, ?, ?, ?, ?, ?)",
-            defaults,
-        )
+        for i, (slug, display, color, desc, enabled) in enumerate(defaults):
+            cur.execute("SELECT slug FROM category_labels WHERE slug = ?", (slug,))
+            if not cur.fetchone():
+                cur.execute(
+                    "INSERT INTO category_labels (slug, display_name, color, description, enabled, position) VALUES (?, ?, ?, ?, ?, ?)",
+                    (slug, display, color, desc, enabled, _next_pos + i),
+                )
         conn.commit()
 
 
@@ -926,7 +927,7 @@ def apply_rule_to_existing_emails(match_type: str, match_value: str, label_slug:
         )
         rows = cur.fetchall()
         for gmail_id, subject, sender, category in rows:
-            category = (category or "fyi").strip()
+            category = (category or "normal").strip()
             if category == label_slug:
                 continue
 

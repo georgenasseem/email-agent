@@ -28,6 +28,7 @@ from agent.email_memory import (
     record_category_override, propose_categories_from_history,
     filter_proposals_with_llm,
     ensure_default_labels,
+    SYSTEM_CATEGORIES,
 )
 from agent.decision_suggester import suggest_decision
 from agent.drafter import draft_reply
@@ -316,9 +317,6 @@ st.markdown(
         border-radius: 999px;
         font-size: 11px;
         font-weight: 500;
-        background: {'rgba(148,163,184,0.1)' if theme == 'dark' else 'rgba(107,114,128,0.1)'};
-        color: {muted_color};
-        border: 1px solid {'rgba(148,163,184,0.2)' if theme == 'dark' else 'rgba(107,114,128,0.2)'};
     }}
 
     /* Style the open-email buttons to be invisible overlays */
@@ -641,7 +639,7 @@ filtered = emails
 # Apply category filter if active
 _active_cat_filter = st.session_state.get("_cat_filter")
 if _active_cat_filter:
-    filtered = [e for e in filtered if (e.get("category", "fyi") or "fyi").strip() == _active_cat_filter]
+    filtered = [e for e in filtered if (e.get("category", "normal") or "normal").strip() == _active_cat_filter]
 
 # Always sort by newest first
 filtered.sort(key=lambda x: x.get("internal_date", 0), reverse=True)
@@ -709,9 +707,10 @@ with draft_col:
                         unsafe_allow_html=True,
                     )
                 with c_mid:
-                    if st.button("Del", key=f"del_cat_{slug}"):
-                        delete_label(slug)
-                        st.rerun()
+                    if slug not in SYSTEM_CATEGORIES:
+                        if st.button("Delete", key=f"del_cat_{slug}"):
+                            delete_label(slug)
+                            st.rerun()
                 with c_right:
                     _filter_active = st.session_state.get("_cat_filter") == slug
                     _filter_label = "Unfilter" if _filter_active else "Filter"
@@ -735,13 +734,13 @@ with draft_col:
         try:
             _enabled_label_options = [lb["slug"] for lb in get_enabled_labels()]
         except Exception:
-            _enabled_label_options = ["action-needed", "fyi", "newsletter"]
+            _enabled_label_options = ["important", "informational", "normal", "newsletter"]
 
         _sel_email = st.session_state.get("selected_email_obj")
         if not _sel_email:
             st.markdown("<div class='card-muted'>Select an email to change its category.</div>", unsafe_allow_html=True)
         else:
-            _re_cat_raw = _sel_email.get("category", "fyi") or "fyi"
+            _re_cat_raw = _sel_email.get("category", "normal") or "normal"
             _re_cat = _re_cat_raw.split(",")[0].strip()
             _re_subj = html.escape(str(_sel_email.get("subject", "(No subject)")))
             _re_sender_raw = _sel_email.get("sender", "")
@@ -1167,7 +1166,7 @@ with email_col:
         pass
 
     for i, email in enumerate(_page_emails):
-        cat = (email.get("category", "fyi") or "fyi").strip()
+        cat = (email.get("category", "normal") or "normal").strip()
         subject = email.get("subject", "(No subject)")
         sender_raw = email.get("sender", "")
         date_raw = email.get("date", "")
@@ -1190,8 +1189,9 @@ with email_col:
         summary_html = html.escape(str(summary))
 
         cat_badge = ""
-        _cb_color = _label_color_map.get(cat, "#94a3b8")
-        cat_badge = f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(cat))}</span>"
+        if cat != "normal":
+            _cb_color = _label_color_map.get(cat, "#94a3b8")
+            cat_badge = f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(cat))}</span>"
         badges = cat_badge
 
         # Each email in its own container for CSS targeting
