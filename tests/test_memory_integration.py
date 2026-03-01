@@ -457,7 +457,7 @@ class TestWipeProcessedData:
     def test_wipe_keeps_raw(self):
         raw = _make_email("msg_001")
         store_raw_email(raw)
-        store_processed_email({**raw, "summary": "Test", "category": "normal"})
+        store_processed_email({**raw, "summary": "Test", "category": "fyi"})
 
         assert get_processed_count() == 1
         wipe_processed_data()
@@ -479,7 +479,7 @@ class TestWipeProcessedData:
 
     def test_wipe_clears_category_memories(self):
         upsert_user_profile("test@test.com")
-        add_memory("test@test.com", "category", "urgent", "Test Subject", source="pipeline")
+        add_memory("test@test.com", "category", "action-needed", "Test Subject", source="pipeline")
         assert len(get_memory_entries(kind="category")) == 1
 
         wipe_processed_data()
@@ -493,7 +493,7 @@ class TestMemoryTable:
     def test_add_and_read(self):
         upsert_user_profile("user@test.com")
         add_memory("user@test.com", "category", "finance", "Budget Subject", source="pipeline")
-        add_memory("user@test.com", "category", "urgent", "Server Down Alert", source="pipeline")
+        add_memory("user@test.com", "category", "action-needed", "Server Down Alert", source="pipeline")
 
         entries = get_memory_entries(kind="category")
         assert len(entries) == 2

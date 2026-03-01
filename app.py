@@ -27,7 +27,7 @@ from agent.email_memory import (
     get_all_labels, get_enabled_labels, create_label, delete_label,
     record_category_override, propose_categories_from_history,
     filter_proposals_with_llm,
-    ensure_default_labels, apply_rule_to_existing_emails,
+    ensure_default_labels,
 )
 from agent.decision_suggester import suggest_decision
 from agent.drafter import draft_reply
@@ -641,10 +641,7 @@ filtered = emails
 # Apply category filter if active
 _active_cat_filter = st.session_state.get("_cat_filter")
 if _active_cat_filter:
-    if _active_cat_filter == "__needs_action__":
-        filtered = [e for e in filtered if e.get("needs_action")]
-    else:
-        filtered = [e for e in filtered if (e.get("category", "normal") or "normal").split(",")[0].strip() == _active_cat_filter]
+    filtered = [e for e in filtered if (e.get("category", "fyi") or "fyi").strip() == _active_cat_filter]
 
 # Always sort by newest first
 filtered.sort(key=lambda x: x.get("internal_date", 0), reverse=True)
@@ -698,26 +695,6 @@ with draft_col:
                 else:
                     st.warning("Enter a name")
 
-        # ── "Needs action" pseudo-filter ──
-        _na_active = st.session_state.get("_cat_filter") == "__needs_action__"
-        _na_c1, _na_c2, _na_c3 = st.columns([3, 1, 1])
-        with _na_c1:
-            st.markdown(
-                "<div style='font-size:13px;padding:4px 0;'>"
-                "<span style='display:inline-block;width:10px;height:10px;border-radius:50%;"
-                f"background:{accent_orange};margin-right:6px;vertical-align:middle;'></span>"
-                "<b>Needs Action</b></div>",
-                unsafe_allow_html=True,
-            )
-        with _na_c3:
-            _na_label = "Unfilter" if _na_active else "Filter"
-            if st.button(_na_label, key="filter_cat___needs_action__"):
-                if _na_active:
-                    st.session_state.pop("_cat_filter", None)
-                else:
-                    st.session_state["_cat_filter"] = "__needs_action__"
-                st.rerun()
-
         # ── Existing labels ──
         if not all_labels:
             st.markdown("<div class='card-muted'>No categories yet.</div>", unsafe_allow_html=True)
@@ -758,13 +735,13 @@ with draft_col:
         try:
             _enabled_label_options = [lb["slug"] for lb in get_enabled_labels()]
         except Exception:
-            _enabled_label_options = ["urgent", "important", "normal", "informational", "newsletter"]
+            _enabled_label_options = ["action-needed", "fyi", "newsletter"]
 
         _sel_email = st.session_state.get("selected_email_obj")
         if not _sel_email:
             st.markdown("<div class='card-muted'>Select an email to change its category.</div>", unsafe_allow_html=True)
         else:
-            _re_cat_raw = _sel_email.get("category", "normal") or "normal"
+            _re_cat_raw = _sel_email.get("category", "fyi") or "fyi"
             _re_cat = _re_cat_raw.split(",")[0].strip()
             _re_subj = html.escape(str(_sel_email.get("subject", "(No subject)")))
             _re_sender_raw = _sel_email.get("sender", "")
@@ -860,26 +837,7 @@ with draft_col:
                                         _rand_color = random.choice(_NICE_COLORS)
                                         new_lb = create_label(prop["proposed_name"], color=_rand_color)
                                     upsert_rule(prop["match_type"], prop["match_value"], new_lb["slug"])
-                                    _applied = apply_rule_to_existing_emails(prop["match_type"], prop["match_value"], new_lb["slug"])
-                                    if _applied and "emails" in st.session_state:
-                                        for _se in st.session_state["emails"]:
-                                            _se_subj = (_se.get("subject") or "").lower()
-                                            _se_sender = (_se.get("sender") or "").lower()
-                                            _mv = prop["match_value"].lower().strip()
-                                            _mt = prop["match_type"]
-                                            _mem_match = False
-                                            if _mt == "subject_keyword" and _mv in _se_subj:
-                                                _mem_match = True
-                                            elif _mt == "sender":
-                                                _addr = _se_sender.split("<")[1].split(">")[0].strip() if "<" in _se_sender else _se_sender.strip()
-                                                _mem_match = _addr == _mv
-                                            elif _mt == "sender_domain":
-                                                _addr = _se_sender.split("<")[1].split(">")[0].strip() if "<" in _se_sender else _se_sender.strip()
-                                                if "@" in _addr:
-                                                    _mem_match = _addr.split("@", 1)[1] == _mv
-                                            if _mem_match:
-                                                _se["category"] = new_lb["slug"]
-                                    st.success(f"Created '{prop['proposed_name']}' \u2013 applied to {_applied} email{'s' if _applied != 1 else ''}")
+                                    st.success(f"Created '{prop['proposed_name']}' — future matching emails will be categorized automatically.")
                                     st.session_state["_cat_proposals"].pop(pi)
                                     st.session_state["_cat_proposals_stale"] = True
                                     st.rerun()
@@ -1209,8 +1167,7 @@ with email_col:
         pass
 
     for i, email in enumerate(_page_emails):
-        cat = (email.get("category", "normal") or "normal").split(",")[0].strip()
-        needs_action = email.get("needs_action", False)
+        cat = (email.get("category", "fyi") or "fyi").strip()
         subject = email.get("subject", "(No subject)")
         sender_raw = email.get("sender", "")
         date_raw = email.get("date", "")
@@ -1232,12 +1189,10 @@ with email_col:
         date_html = html.escape(str(date_simple))
         summary_html = html.escape(str(summary))
 
-        action_badge = "<span class='badge-action'>Needs action</span>" if needs_action else ""
         cat_badge = ""
-        if cat != "normal":
-            _cb_color = _label_color_map.get(cat, "#94a3b8")
-            cat_badge = f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(cat))}</span>"
-        badges = f"{action_badge} {cat_badge}".strip()
+        _cb_color = _label_color_map.get(cat, "#94a3b8")
+        cat_badge = f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(cat))}</span>"
+        badges = cat_badge
 
         # Each email in its own container for CSS targeting
         eid_html = html.escape(str(email.get("id", "")), quote=True)

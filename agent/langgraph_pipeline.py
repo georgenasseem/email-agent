@@ -226,7 +226,7 @@ def flag_urgent_node(state: EmailAgentState) -> dict:
 
 
 def postprocess_categories_node(state: EmailAgentState) -> dict:
-    """Deterministically reconcile category with needs_action/urgency signals.\n\n    Respects user-disabled categories — will not promote to a disabled category.\n    """
+    """Promote fyi/newsletter → action-needed when the urgent detector flagged needs_action."""
     emails = state.get("emails") or []
     if not emails:
         return {}
@@ -236,38 +236,16 @@ def postprocess_categories_node(state: EmailAgentState) -> dict:
         from agent.email_memory import get_enabled_labels
         _enabled = {lb["slug"] for lb in get_enabled_labels()}
     except Exception:
-        _enabled = {"urgent", "important", "normal", "informational", "newsletter"}
-
-    security_keywords = [
-        "security alert", "verify your account", "password reset",
-        "suspicious activity", "unusual activity", "unauthorized access",
-        "token expired", "token revoked", "access token",
-    ]
-    hard_deadline_keywords = [
-        "by end of day", "by eod", "today", "tonight", "deadline",
-    ]
+        _enabled = {"action-needed", "fyi", "newsletter"}
 
     for e in emails:
-        needs_action = e.get("needs_action", False)
-        if not needs_action:
+        if not e.get("needs_action", False):
             continue
-        cat = (e.get("category") or "normal").lower()
-        if cat not in ["informational", "newsletter"]:
-            continue
-        text = " ".join([
-            str(e.get("subject", "")).lower(),
-            str(e.get("body", "")).lower(),
-            str(e.get("snippet", "")).lower(),
-        ])
-        if any(k in text for k in security_keywords + hard_deadline_keywords):
-            # Only promote to "urgent" if it's enabled, otherwise "important"
-            if "urgent" in _enabled:
-                e["category"] = "urgent"
-            elif "important" in _enabled:
-                e["category"] = "important"
-        else:
-            if "important" in _enabled:
-                e["category"] = "important"
+        cat = (e.get("category") or "fyi").lower()
+        if cat in ("fyi", "newsletter"):
+            # Promote to action-needed if it's enabled
+            if "action-needed" in _enabled:
+                e["category"] = "action-needed"
 
     return {"emails": emails}
 

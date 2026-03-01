@@ -5,7 +5,7 @@ from langchain_core.output_parsers import StrOutputParser
 from agent.llm import get_llm
 from agent.email_memory import build_memory_context, match_rules_for_email, get_enabled_labels
 
-CATEGORIES = ["urgent", "important", "normal", "informational", "newsletter"]
+CATEGORIES = ["action-needed", "fyi", "newsletter"]
 
 
 def _get_valid_categories() -> list[str]:
@@ -85,7 +85,7 @@ def categorize_email(email: dict) -> dict:
         pass
 
     # ── 2. Run newsletter heuristics BEFORE LLM to save a call ──
-    heuristic_cat = _apply_newsletter_heuristics(email, "normal")
+    heuristic_cat = _apply_newsletter_heuristics(email, "fyi")
     if heuristic_cat == "newsletter":
         return {**email, "category": "newsletter"}
 
@@ -110,10 +110,8 @@ def categorize_email(email: dict) -> dict:
 
     # Build dynamic category descriptions for enabled system categories only
     _cat_descriptions = {
-        "urgent": "- urgent: MUST act TODAY. Security alerts, account verification, boss/CEO urgent requests, same-day deadlines.",
-        "important": "- important: Act within 24-48h. Client requests, approvals, feedback, rescheduling, time-sensitive offers.",
-        "normal": "- normal: Routine. Meeting reminders, confirmations, coordination, FYI. Default when unsure.",
-        "informational": "- informational: Informational only, no action. Event listings, general updates.",
+        "action-needed": "- action-needed: Requires a response, decision, or task. Requests, approvals, deadlines, questions, action items.",
+        "fyi": "- fyi: Informational only, no action needed. Updates, confirmations, reminders, FYI, routine. Default when unsure.",
         "newsletter": "- newsletter: Marketing, newsletters, promotions, unsubscribe links, mass mailings.",
     }
     _enabled_sys_cats = [c for c in CATEGORIES if c in valid_cats]
@@ -129,10 +127,11 @@ CATEGORIES (use exactly these words):
 {_cat_block}{user_labels_block}
 
 CRITICAL:
-- "newsletter" or "informational": Newsletters, event listings, marketing, promotions, "click here", tracking pixels, noreply senders.
-- "normal": Default. Reminders, confirmations, routine updates, meeting locations.
+- "newsletter": Newsletters, marketing, promotions, "click here", tracking pixels, noreply senders.
+- "fyi": Default. Confirmations, routine updates, event listings, no reply needed.
+- "action-needed": The sender expects YOU to do something — reply, approve, complete a task.
 
-Output ONLY one word from the categories above."""
+Output ONLY one category slug from the list above."""
 
     preview = _build_preview(email)
     thread_ctx = (email.get("thread_context") or "")[:300]
@@ -169,13 +168,13 @@ Category (one word only):"""
 
     # Normalize and validate – accept system + user-defined slugs
     if cat not in valid_cats:
-        # Try to recover from phrases like "Category: urgent"
+        # Try to recover from phrases like "Category: action-needed"
         for c in valid_cats:
             if c in cat:
                 cat = c
                 break
         else:
-            cat = "normal"
+            cat = "fyi"
 
     return {**email, "category": cat}
 

@@ -93,7 +93,7 @@ def reply_analysis_node(state: QuickActionState) -> dict:
     subject = (email.get("subject") or "")[:120]
     body = (email.get("clean_body") or email.get("body") or email.get("snippet") or "")[:1000]
     sender = email.get("sender", "")
-    category = email.get("category", "normal")
+    category = email.get("category", "fyi")
     thread_ctx = (email.get("thread_context") or "")[:300]
     memory_ctx = state.get("memory_context", "")
     sender_hist = state.get("sender_history", "")
@@ -102,7 +102,7 @@ def reply_analysis_node(state: QuickActionState) -> dict:
     sender_lower = sender.lower()
     if any(s in sender_lower for s in ["noreply", "no-reply", "mailer-daemon", "donotreply"]):
         return {"reply_options": []}
-    if category in ["newsletter", "informational"]:
+    if category in ["newsletter"]:
         return {"reply_options": []}
 
     llm = get_llm(task="decide")
@@ -252,13 +252,13 @@ Does this require scheduling? (JSON array only):"""
 def archive_analysis_node(state: QuickActionState) -> dict:
     """Determine if the email is purely FYI and should suggest archiving."""
     email = state.get("email") or {}
-    category = email.get("category", "normal")
+    category = email.get("category", "fyi")
     sender = (email.get("sender") or "").lower()
     needs_action = email.get("needs_action", False)
 
     # Direct signals for archive
     noreply = any(s in sender for s in ["noreply", "no-reply", "donotreply", "mailer-daemon"])
-    is_newsletter = category in ["newsletter", "informational"]
+    is_newsletter = category in ["newsletter"]
 
     if noreply or (is_newsletter and not needs_action):
         return {"archive_option": "Archive: No action needed"}
