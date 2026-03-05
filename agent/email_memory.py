@@ -405,7 +405,6 @@ def get_linked_emails(gmail_id: str, limit: int = 10) -> List[dict]:
         d["id"] = d.pop("gmail_id")
         d["needs_action"] = bool(d.get("needs_action"))
         opts_json = d.pop("decision_options_json", None)
-        opts_json = d.pop("decision_options_json", None)
         if opts_json is not None:
             try:
                 d["decision_options"] = json.loads(opts_json)

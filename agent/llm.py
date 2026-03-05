@@ -8,6 +8,10 @@ from config import get_llm_config, get_task_profile
 
 logger = logging.getLogger(__name__)
 
+# ─── Global rate-limit state (shared across ALL SimpleLLM instances) ─────────
+# Prevents overwhelming API rate limits when many instances are created in bulk.
+_global_last_request_time: float = 0.0
+
 # ─── Simple response cache ──────────────────────────────────────────────────
 # Keyed by (model, temperature, prompt_hash).  Avoids redundant LLM calls on
 # retrain or repeated entity lookups.  Lives in-process only (no disk).
@@ -235,9 +239,11 @@ class SimpleLLM:
         return ""
 
     def _rate_limit_wait(self) -> None:
-        elapsed = time.time() - self._last_request_time
+        global _global_last_request_time
+        elapsed = time.time() - _global_last_request_time
         if elapsed < self._min_request_interval:
             time.sleep(self._min_request_interval - elapsed)
+        _global_last_request_time = time.time()
 
     def _invoke_groq(self, messages: List[object], max_tokens: int, temperature: float) -> str:
         """Groq-specific invocation with retry / rate-limit handling."""
@@ -255,7 +261,7 @@ class SimpleLLM:
             "max_tokens": max_tokens,
         }
 
-        max_retries = 3
+        max_retries = 5
         backoff_seconds = 1.0
 
         for attempt in range(max_retries):
@@ -265,7 +271,8 @@ class SimpleLLM:
                 "https://api.groq.com/openai/v1/chat/completions",
                 json=data, headers=headers, timeout=60,
             )
-            self._last_request_time = time.time()
+            global _global_last_request_time
+            _global_last_request_time = time.time()
 
             if response.status_code == 200:
                 result = response.json()

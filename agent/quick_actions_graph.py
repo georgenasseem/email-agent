@@ -191,20 +191,40 @@ Suggest reply actions the user might want to send. Be SPECIFIC to the email cont
         text = _extract_json_array(raw)
         options = json.loads(text)
         if isinstance(options, list):
+            # Flatten nested lists (some local models produce [["a", "b"]])
+            flat: list = []
+            for item in options:
+                if isinstance(item, list):
+                    flat.extend(item)
+                else:
+                    flat.append(item)
             results = []
-            for o in options:
-                if not isinstance(o, dict):
+            for o in flat:
+                if isinstance(o, dict):
+                    label = str(o.get("label", "")).strip()
+                    if not label:
+                        continue
+                    action = {
+                        "type": "reply",
+                        "label": label,
+                        "context": str(o.get("context", "")).strip(),
+                        "has_meeting": bool(o.get("has_meeting", False)),
+                        "meeting_action": o.get("meeting_action") if o.get("has_meeting") else None,
+                    }
+                elif isinstance(o, str) and o.strip():
+                    # Local models may return plain strings instead of dicts
+                    label = o.strip()
+                    if len(label) > 80:
+                        label = label[:77] + "..."
+                    action = {
+                        "type": "reply",
+                        "label": label,
+                        "context": o.strip(),
+                        "has_meeting": False,
+                        "meeting_action": None,
+                    }
+                else:
                     continue
-                label = str(o.get("label", "")).strip()
-                if not label:
-                    continue
-                action = {
-                    "type": "reply",
-                    "label": label,
-                    "context": str(o.get("context", "")).strip(),
-                    "has_meeting": bool(o.get("has_meeting", False)),
-                    "meeting_action": o.get("meeting_action") if o.get("has_meeting") else None,
-                }
                 # Validate meeting_action values
                 if action["meeting_action"] not in (None, "accept", "decline", "reschedule"):
                     action["meeting_action"] = None

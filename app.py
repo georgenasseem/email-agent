@@ -456,6 +456,15 @@ llm_options = ["Groq (hosted)", "Qwen 2.5 3B (local)", "Qwen 2.5 7B (local)"]
 default_llm_display = st.session_state.get("llm_backend", "Qwen 2.5 3B (local)")
 # MIN_FETCH / MAX_FETCH replaced by INITIAL_FETCH_COUNT and FETCH_NEW_COUNT from the pipeline.
 
+# ── Set LLM provider EARLY so backfill, pipeline, and all LLM calls use the
+#    model selected in the UI rather than whatever is in .env / config.py. ──
+_llm_provider_map = {
+    "Groq (hosted)": "groq",
+    "Qwen 2.5 3B (local)": "qwen_local_3b",
+    "Qwen 2.5 7B (local)": "qwen_local_7b",
+}
+os.environ["LLM_PROVIDER"] = _llm_provider_map.get(default_llm_display, "qwen_local_3b")
+
 # Main header row: logo | model | fetch | sign-out
 header = st.container()
 with header:
@@ -557,17 +566,27 @@ if "emails" not in st.session_state and "_memory_loaded" not in st.session_state
     try:
         cached = load_from_memory()   # loads ALL stored emails (no limit)
         if cached:
-            # Backfill: regenerate quick actions for emails that are missing them.
-            # decision_options is None when never processed, or missing from DB.
-            # An explicit empty list [] means "processed but no actions" — skip those.
+            # Backfill: regenerate quick actions for emails with missing actions.
+            # decision_options is None (NULL in DB) → never processed / LLM failed.
+            # decision_options is [] → could be a prior failure that stored []
+            #   before reaching the LLM, so we retry those too (idempotent).
             _needs_backfill = [
                 _ce for _ce in cached
                 if _ce.get("decision_options") is None
+                or _ce.get("decision_options") == []
             ]
             if _needs_backfill:
                 from agent.quick_actions_graph import suggest_quick_actions_full as _backfill_qa
+                from agent.categorizer import categorize_email as _backfill_cat
                 from agent.email_memory import store_processed_emails as _backfill_store
                 for _ce in _needs_backfill:
+                    # Re-categorize too — if quick actions were missing, the
+                    # category may also have defaulted to informational on error.
+                    try:
+                        _recat = _backfill_cat(_ce)
+                        _ce["category"] = _recat.get("category", _ce.get("category", "informational"))
+                    except Exception:
+                        pass
                     try:
                         _bf_result = _backfill_qa(_ce)
                         _bf_opts = _bf_result.get("final_options", [])
@@ -576,7 +595,7 @@ if "emails" not in st.session_state and "_memory_loaded" not in st.session_state
                         if _bf_na:
                             _ce["no_action_message"] = _bf_na
                     except Exception:
-                        _ce["decision_options"] = []  # Mark as processed to avoid re-trying
+                        pass  # Leave as None — next restart will retry
                 # Persist backfilled options to DB
                 try:
                     _backfill_store(_needs_backfill)
@@ -631,14 +650,11 @@ if "pipeline_error" in st.session_state:
     st.error(f"**Pipeline error:** {st.session_state['pipeline_error']}")
     del st.session_state["pipeline_error"]
 
-# After header widgets are created, map current model to provider
-llm_provider_map = {
-    "Groq (hosted)": "groq",
-    "Qwen 2.5 3B (local)": "qwen_local_3b",
-    "Qwen 2.5 7B (local)": "qwen_local_7b",
-}
-current_llm_display = st.session_state.get("llm_backend", default_llm_display)
-os.environ["LLM_PROVIDER"] = llm_provider_map.get(current_llm_display, "qwen_local_3b")
+# After header widgets are created, refresh the env var in case the user
+# changed the selectbox *this* rerun (the widget value may have updated).
+os.environ["LLM_PROVIDER"] = _llm_provider_map.get(
+    st.session_state.get("llm_backend", default_llm_display), "qwen_local_3b"
+)
 
 # Email fetching and processing workflow (LangGraph pipeline)
 if st.session_state.get("is_analyzing", False):
@@ -729,9 +745,13 @@ draft_col, email_col = st.columns([1.1, 2.3])
 sel_id = st.session_state.get("selected_email")
 selected_email = None
 if sel_id:
-    selected_email = st.session_state.get("selected_email_obj")
-    if not selected_email:
-        selected_email = next((e for e in emails if e.get("id") == sel_id), None)
+    # Always look up from the current emails list to avoid stale data
+    # (e.g. after pipeline run updates decision_options in the email dict).
+    selected_email = next((e for e in emails if e.get("id") == sel_id), None)
+    if selected_email:
+        st.session_state["selected_email_obj"] = selected_email
+    else:
+        selected_email = st.session_state.get("selected_email_obj")
 
 with draft_col:
     # Tab selector: Drafting vs Todo vs Categories
@@ -1021,31 +1041,27 @@ with draft_col:
 
             # ── Quick Actions ────────────────────────────────────────
             # Color-coded action buttons: orange=reply, purple=todo, grey=custom
-            options_key = f"reply_options_{eid}"
-            options = st.session_state.get(options_key)
-            if options is None:
-                pre = email.get("decision_options")
-                if pre and isinstance(pre, list) and len(pre) > 0:
-                    # Normalize: handle both new dict format and legacy string format
-                    normalized = []
-                    for item in pre:
-                        if isinstance(item, dict) and item.get("label"):
-                            normalized.append(item)
-                        elif isinstance(item, str):
-                            # Legacy format: "Reply: ...", "Todo: ...", "Schedule: ..."
-                            s = item.strip()
-                            if s.startswith("Reply:"):
-                                normalized.append({"type": "reply", "label": s[6:].strip(), "context": s[6:].strip(), "has_meeting": False, "meeting_action": None})
-                            elif s.startswith("Todo:"):
-                                normalized.append({"type": "todo", "label": s[5:].strip(), "context": s[5:].strip()})
-                            elif s.startswith("Schedule:"):
-                                normalized.append({"type": "reply", "label": s[9:].strip(), "context": s[9:].strip(), "has_meeting": True, "meeting_action": "accept"})
-                            elif s:
-                                normalized.append({"type": "reply", "label": s, "context": s, "has_meeting": False, "meeting_action": None})
-                    options = normalized
-                else:
-                    options = []
-                st.session_state[options_key] = options
+            # Always derive from the email dict to pick up backfill/pipeline updates.
+            pre = email.get("decision_options")
+            options = []
+            if pre and isinstance(pre, list) and len(pre) > 0:
+                # Normalize: handle both new dict format and legacy string format
+                normalized = []
+                for item in pre:
+                    if isinstance(item, dict) and item.get("label"):
+                        normalized.append(item)
+                    elif isinstance(item, str):
+                        # Legacy format: "Reply: ...", "Todo: ...", "Schedule: ..."
+                        s = item.strip()
+                        if s.startswith("Reply:"):
+                            normalized.append({"type": "reply", "label": s[6:].strip(), "context": s[6:].strip(), "has_meeting": False, "meeting_action": None})
+                        elif s.startswith("Todo:"):
+                            normalized.append({"type": "todo", "label": s[5:].strip(), "context": s[5:].strip()})
+                        elif s.startswith("Schedule:"):
+                            normalized.append({"type": "reply", "label": s[9:].strip(), "context": s[9:].strip(), "has_meeting": True, "meeting_action": "accept"})
+                        elif s:
+                            normalized.append({"type": "reply", "label": s, "context": s, "has_meeting": False, "meeting_action": None})
+                options = normalized
 
             if options:
                 # Sort: reply actions first, then todo

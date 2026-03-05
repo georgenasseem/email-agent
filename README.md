@@ -7,7 +7,7 @@ An AI-powered email assistant that reads your Gmail inbox, categorises messages,
 - **Smart categorisation** — Emails are automatically labelled (important, newsletter, academic, social, etc.). Create your own custom labels and the agent learns from your overrides.
 - **Quick actions** — Each email gets context-aware action buttons: reply options (orange), todo tasks (purple), and custom actions (grey).
 - **Style-matched drafting** — The drafting pipeline (plan → draft → critique → revise → finalise) writes replies that match your personal tone and greeting style.
-- **Meeting detection & scheduling** — Meeting invitations are detected automatically. Accept, decline, or reschedule with one click — the agent checks your Google Calendar for free slots and optionally adds a Zoom link.
+- **Meeting detection & scheduling** — Meeting invitations are detected automatically. Accept, decline, or reschedule with one click — the agent checks your Google Calendar for free slots and adds a Zoom link.
 - **Todo list** — Actionable tasks extracted from emails are tracked in a built-in todo panel.
 - **Memory & context** — Past interactions, sender history, and thread context feed into every decision for smarter suggestions over time.
 - **Multi-model support** — Run fully offline with a local Qwen 2.5 3B model (default), upgrade to a local 7B model, or use Groq's hosted API for maximum speed.
@@ -16,24 +16,31 @@ An AI-powered email assistant that reads your Gmail inbox, categorises messages,
 
 The agent is built on **LangGraph** with three core graphs:
 
-1. **Email processing pipeline** (`agent/langgraph_pipeline.py`) — Parallel fan-out: categorise, summarise, extract entities, detect urgency, and detect meetings all run simultaneously, then merge.
-2. **Quick actions graph** (`agent/quick_actions_graph.py`) — Parallel fan-out: reply analysis and todo extraction run simultaneously, then merge/deduplicate/validate.
-3. **Drafting graph** (`agent/drafting_graph.py`) — Sequential: plan → draft → critique → (revise if needed) → finalise with signature.
+### 1. Email Processing Pipeline
 
-```
-Gmail API  →  Email Pipeline (parallel)  →  Quick Actions (parallel)  →  UI
-                 ├─ categorise                  ├─ reply analysis
-                 ├─ summarise                   └─ todo extraction
-                 ├─ extract entities                    ↓
-                 ├─ detect urgency              merge & validate
-                 └─ detect meetings
-```
+Parallel fan-out: categorise, summarise, extract entities, detect urgency, and detect meetings all run simultaneously, then merge.
 
-## Prerequisites
+<p align="center">
+  <img src="docs/email_pipeline.svg" alt="Email Processing Pipeline" width="500">
+</p>
 
-- **Python 3.11+**
-- **Google Cloud project** with Gmail API and Google Calendar API enabled
-- A `credentials.json` OAuth 2.0 client file (see [Setup](#2-google-api-credentials) below)
+### 2. Quick Actions Graph
+
+Parallel fan-out: reply analysis and todo extraction run simultaneously, then merge/deduplicate/validate.
+
+<p align="center">
+  <img src="docs/quick_actions.svg" alt="Quick Actions Graph" width="420">
+</p>
+
+### 3. Drafting Graph
+
+Sequential: plan → draft → critique → (revise if needed) → finalise with signature.
+
+<p align="center">
+  <img src="docs/drafting.svg" alt="Drafting Graph" width="360">
+</p>
+
+---
 
 ## Setup
 
@@ -47,7 +54,36 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Google API credentials
+### 2. Download the local model
+
+The default model is **Qwen 2.5 3B Instruct** (GGUF, ~2 GB). Place it in the `models/qwen/` directory:
+
+```bash
+mkdir -p models/qwen
+```
+
+**Option A — Direct download link:**
+
+Download [`qwen2.5-3b-instruct-q5_k_m.gguf`](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q5_k_m.gguf) and place it at `models/qwen/qwen2.5-3b-instruct-q5_k_m.gguf`.
+
+**Option B — Hugging Face CLI:**
+
+```bash
+pip install huggingface_hub
+huggingface-cli download Qwen/Qwen2.5-3B-Instruct-GGUF qwen2.5-3b-instruct-q5_k_m.gguf --local-dir models/qwen
+```
+
+**Option C — Receive the file directly:**
+
+The `.gguf` model file is openly licensed and can be freely shared. If a teammate already has it, just copy it into `models/qwen/`.
+
+### 3. Google API credentials
+
+The app needs access to your Gmail and Google Calendar. You need a `credentials.json` OAuth 2.0 client file.
+
+**If you received `credentials.json` with the project** (e.g. from a teammate), place it in the project root and skip to step 4. You may need to be added as a test user on the Google Cloud project — ask the project owner to add your Google account under **OAuth consent screen → Test users**.
+
+**If you need to create your own:**
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
 2. Create a new project (or select an existing one).
@@ -57,58 +93,58 @@ pip install -r requirements.txt
    - Download the JSON file and save it as `credentials.json` in the project root.
 5. Under **OAuth consent screen**, add your Google account as a test user.
 
-### 3. Download the local model (required)
+### 4. Zoom credentials
 
-The default model is **Qwen 2.5 3B Instruct** (GGUF, ~2 GB). Download it into the `models/qwen/` directory:
+Zoom integration is required for automatic meeting link creation.
 
-```bash
-mkdir -p models/qwen
-```
+1. Go to the [Zoom App Marketplace](https://marketplace.zoom.us/) and sign in.
+2. Click **Develop → Build App → Server-to-Server OAuth**.
+3. Note the **Account ID**, **Client ID**, and **Client Secret**.
+4. Under **Scopes**, add `meeting:write:admin` (or `meeting:write`).
+5. Activate the app.
 
-Download from Hugging Face: [Qwen2.5-3B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF)
-
-File: `qwen2.5-3b-instruct-q5_k_m.gguf` → place at `models/qwen/qwen2.5-3b-instruct-q5_k_m.gguf`
-
-Or use the Hugging Face CLI:
-
-```bash
-pip install huggingface_hub
-huggingface-cli download Qwen/Qwen2.5-3B-Instruct-GGUF qwen2.5-3b-instruct-q5_k_m.gguf --local-dir models/qwen
-```
-
-### 4. Environment variables
+### 5. Environment variables
 
 ```bash
 cp .env.example .env
 ```
 
-The defaults work out of the box with the local 3B model — no API keys needed for local inference.
+Edit `.env` and fill in your Zoom credentials:
 
-### 5. Run
+```
+ZOOM_ACCOUNT_ID=your_account_id
+ZOOM_CLIENT_ID=your_client_id
+ZOOM_CLIENT_SECRET=your_client_secret
+```
+
+The defaults use the local Qwen 3B model — no additional API keys needed.
+
+### 6. Run
 
 ```bash
 streamlit run app.py
 ```
 
-On first launch the app opens a browser window to sign in with Google (OAuth). After authorising, click **Fetch new emails** to pull your inbox.
+On first launch the app opens a browser window to sign in with Google (OAuth). After authorising, the agent fetches your inbox and processes it automatically.
 
 ---
 
-## Optional upgrades
-
-### Qwen 2.5 7B model
+## Optional: Qwen 2.5 7B model
 
 For better quality on complex emails, download the 7B model (~4.6 GB, split into two files):
 
-Download from Hugging Face: [Qwen2.5-7B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)
+Download both split files from [Qwen2.5-7B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF):
 
-Files: `qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf` and `qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf` → place both in `models/qwen/`
+- `qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf`
+- `qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf`
 
-Then select **Qwen 2.5 7B (local)** from the model dropdown in the UI.
+Place both in `models/qwen/` and select **Qwen 2.5 7B (local)** from the model dropdown in the UI.
 
-### Groq (hosted API)
+---
 
-For the fastest inference using hosted models:
+## Optional: Groq (hosted API)
+
+For faster inference using hosted models instead of local ones:
 
 1. Get a free API key at [https://console.groq.com/](https://console.groq.com/).
 2. In `.env`:
@@ -120,17 +156,18 @@ For the fastest inference using hosted models:
 
 Groq uses `llama-3.3-70b-versatile` for heavy tasks and `llama-3.1-8b-instant` for lightweight tasks by default.
 
-### Zoom integration
+---
 
-To add Zoom meeting links when scheduling:
+## Summary: what do you need?
 
-1. Create a **Server-to-Server OAuth** app at [https://marketplace.zoom.us/](https://marketplace.zoom.us/).
-2. In `.env`:
-   ```
-   ZOOM_ACCOUNT_ID=your_account_id
-   ZOOM_CLIENT_ID=your_client_id
-   ZOOM_CLIENT_SECRET=your_client_secret
-   ```
+| Component                         | Required? | Notes                                         |
+| --------------------------------- | --------- | --------------------------------------------- |
+| Python 3.11+                      | **Yes**   |                                               |
+| `pip install -r requirements.txt` | **Yes**   |                                               |
+| Qwen 2.5 3B GGUF model            | **Yes**   | ~2 GB download (see step 2)                   |
+| `credentials.json` (Google OAuth) | **Yes**   | Create your own or get from the project owner |
+| Zoom credentials                  | **Yes**   | Server-to-Server OAuth app (see step 4)       |
+| Groq API key                      | No        | Optional alternative to local model           |
 
 ---
 
@@ -173,7 +210,3 @@ models/
 ```bash
 python -m pytest tests/ -v
 ```
-
-## License
-
-MIT

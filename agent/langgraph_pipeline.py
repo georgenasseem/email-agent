@@ -27,7 +27,7 @@ from agent.email_memory import (
 )
 from agent.style_learner import learn_and_persist_style, load_persisted_style
 from agent.summarizer import summarize_batch
-from agent.categorizer import categorize_emails
+from agent.categorizer import categorize_emails, categorize_email
 from agent.urgent_detector import flag_urgent_emails
 from agent.decision_suggester import suggest_decision
 from agent.quick_actions_graph import suggest_quick_actions_full
@@ -250,21 +250,40 @@ def learn_style_node(state: EmailAgentState) -> dict:
 
 
 def summarize_node(state: EmailAgentState) -> dict:
-    """Summarize emails."""
+    """Summarize emails (per-email error isolation)."""
     emails = state.get("emails") or []
     if not emails:
         return {}
-    summarized = summarize_batch(emails)
-    return {"emails": summarized}
+    import logging as _slog
+    _slogger = _slog.getLogger(__name__)
+    try:
+        summarized = summarize_batch(emails)
+        return {"emails": summarized}
+    except Exception as exc:
+        _slogger.warning("Batch summarize failed: %s", exc)
+        # Fallback: use snippet as summary
+        for e in emails:
+            if not e.get("summary"):
+                e["summary"] = (e.get("snippet") or "")[:200]
+        return {"emails": emails}
 
 
 def categorize_node(state: EmailAgentState) -> dict:
-    """Categorize emails."""
+    """Categorize emails (per-email error isolation)."""
     emails = state.get("emails") or []
     if not emails:
         return {}
-    categorized = categorize_emails(emails)
-    return {"emails": categorized}
+    import logging as _clog
+    _clogger = _clog.getLogger(__name__)
+    results = []
+    for e in emails:
+        try:
+            results.append(categorize_email(e))
+        except Exception as exc:
+            _clogger.warning("Categorize failed for %s: %s", e.get("id", "?"), exc)
+            e.setdefault("category", "informational")
+            results.append(e)
+    return {"emails": results}
 
 
 def flag_urgent_node(state: EmailAgentState) -> dict:
@@ -345,7 +364,8 @@ def suggest_decision_node(state: EmailAgentState) -> dict:
                 e["no_action_message"] = no_action
         except Exception as exc:
             _logger.warning("Quick-actions failed for %s: %s", e.get("id", "?"), exc)
-            e["decision_options"] = []
+            # Leave decision_options absent (None) — NOT [] — so backfill
+            # retries on next load instead of silently marking as "no actions".
             continue
     return {"emails": emails}
 
