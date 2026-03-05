@@ -1,137 +1,88 @@
-# AI Email Agent
+# Email Agent
 
-An intelligent email assistant built with **Streamlit**, **LangGraph**, and **LLM-powered pipelines** that fetches your Gmail inbox, summarizes emails, categorizes them, suggests quick actions, drafts context-aware replies, and schedules meetings via Google Calendar and Zoom.
-
----
+An AI-powered email assistant that reads your Gmail inbox, categorises messages, suggests quick actions, drafts replies in your writing style, and manages meetings — all from a single Streamlit dashboard.
 
 ## Features
 
-### Core Pipeline
-- **Fetch & Process** — Pulls emails from Gmail via the API, summarizes each one, categorizes it, detects urgency, and suggests quick actions — all in a single LangGraph pipeline.
-- **Persistent Memory** — Raw and processed emails are stored in SQLite so subsequent loads are instant. Only new emails are fetched and processed.
-- **Style Learning** — Analyzes your sent emails to learn your greeting style, closing style, tone, and patterns. Drafts match how you actually write.
-
-### Intelligent Categorization
-- **LLM + Rules** — Categories are assigned by the LLM, with deterministic overrides for newsletters, security alerts, and user-defined rules.
-- **Custom Labels** — Create, rename, hide, and delete your own category labels (e.g., "Advising", "Finance", "Meetings").
-- **Content-Based Learning** — When you override a category, the system learns keyword rules from the email subject so future emails with similar content are categorized automatically. Rules are content-based, not sender-based, because the same sender can send different types of emails.
-- **Category Proposals** — The system analyzes recurring keywords across your inbox and proposes new categories to create.
-
-### Smart Drafting
-- **Role-Aware** — Knows who you are and who you're replying to; never flips the perspective.
-- **Plan-Then-Draft** — A two-step LLM process: first creates a structured reply plan (goal, key points, tone), then writes the actual reply informed by that plan.
-- **Context-Rich** — Uses thread context, cross-email related context, sender history, and memory to produce informed replies.
-- **Quick Actions** — LLM-suggested actions like "Accept", "Decline", "Acknowledge", "Forward to team" appear as one-click buttons that auto-draft the appropriate reply.
-
-### Scheduling
-- **Meeting Detection** — Extracts meeting intent (topic, duration, attendees) from email content using an LLM.
-- **Calendar Integration** — Checks Google Calendar for free slots and proposes available meeting times.
-- **Zoom Integration** — Optionally creates a Zoom meeting and adds the join link to the calendar event.
-- **Force Scheduling** — The UI "Schedule" button bypasses the LLM intent gate so you can schedule from any email.
-
-### UI
-- **Dark Theme Dashboard** — Compact Streamlit layout with email list, drafting panel, and action tabs.
-- **Email Rendering** — Full HTML email rendering in a sandboxed iframe with sanitized styles.
-- **Tabs** — Drafting, Todo, and Categories tabs for managing replies, tasks, and labels.
-- **Retrain Shortcut** — `Ctrl+Shift+K` wipes processed data and reprocesses all stored emails.
-
----
+- **Smart categorisation** — Emails are automatically labelled (important, newsletter, academic, social, etc.). Create your own custom labels and the agent learns from your overrides.
+- **Quick actions** — Each email gets context-aware action buttons: reply options (orange), todo tasks (purple), and custom actions (grey).
+- **Style-matched drafting** — The drafting pipeline (plan → draft → critique → revise → finalise) writes replies that match your personal tone and greeting style.
+- **Meeting detection & scheduling** — Meeting invitations are detected automatically. Accept, decline, or reschedule with one click — the agent checks your Google Calendar for free slots and optionally adds a Zoom link.
+- **Todo list** — Actionable tasks extracted from emails are tracked in a built-in todo panel.
+- **Memory & context** — Past interactions, sender history, and thread context feed into every decision for smarter suggestions over time.
+- **Multi-model support** — Run fully offline with a local Qwen 2.5 3B model (default), upgrade to a local 7B model, or use Groq's hosted API for maximum speed.
 
 ## Architecture
 
+The agent is built on **LangGraph** with three core graphs:
+
+1. **Email processing pipeline** (`agent/langgraph_pipeline.py`) — Parallel fan-out: categorise, summarise, extract entities, detect urgency, and detect meetings all run simultaneously, then merge.
+2. **Quick actions graph** (`agent/quick_actions_graph.py`) — Parallel fan-out: reply analysis and todo extraction run simultaneously, then merge/deduplicate/validate.
+3. **Drafting graph** (`agent/drafting_graph.py`) — Sequential: plan → draft → critique → (revise if needed) → finalise with signature.
+
 ```
-app.py                          Streamlit UI (entry point)
-config.py                       Environment vars, LLM routing, task profiles
-
-agent/
-├── langgraph_pipeline.py       LangGraph graph: fetch → summarize → categorize → flag → decide → enrich
-├── llm.py                      LLM adapter (Groq API or local Qwen via llama-cpp-python)
-├── summarizer.py               Per-email summarization
-├── categorizer.py              Category assignment (rules → LLM → newsletter heuristics)
-├── urgent_detector.py          Urgency flagging with keyword triggers
-├── decision_suggester.py       Quick action suggestions via LLM
-├── drafter.py                  Role-aware reply drafting with plan-then-write
-├── style_learner.py            Learns writing style from sent emails
-├── meeting_extractor.py        Extracts meeting intent from email text
-├── scheduling.py               Proposes meeting times, creates calendar events
-├── email_memory.py             Email persistence, category CRUD, rule learning
-├── memory_store.py             SQLite schema and connection management
-├── text_cleaner.py             Deterministic email text cleaning (no LLM)
-├── context_enrichment.py       Entity extraction and cross-email context
-├── delegation.py               Delegation rule matching
-└── profile.py                  User profile management
-
-tools/
-├── google_auth.py              Shared OAuth for Gmail + Calendar
-├── gmail_tools.py              Gmail API: fetch, send, search, thread retrieval
-├── calendar_tools.py           Google Calendar: list events, find free slots, create events
-└── zoom_tools.py               Zoom Server-to-Server OAuth: create meetings
-
-tests/
-├── test_memory_integration.py         38 tests — email storage, links, memory context
-├── test_scheduling_integration.py     41 tests — calendar, slots, meeting extraction
-└── test_categories_integration.py     52 tests — labels, rules, overrides, proposals
+Gmail API  →  Email Pipeline (parallel)  →  Quick Actions (parallel)  →  UI
+                 ├─ categorise                  ├─ reply analysis
+                 ├─ summarise                   └─ todo extraction
+                 ├─ extract entities                    ↓
+                 ├─ detect urgency              merge & validate
+                 └─ detect meetings
 ```
 
----
-
-## Setup
-
-### Prerequisites
+## Prerequisites
 
 - **Python 3.11+**
-- A **Google Cloud project** with Gmail and Calendar APIs enabled
-- A **Groq API key** (free at [groq.com](https://groq.com)) — or local Qwen GGUF models
-- *(Optional)* Zoom Server-to-Server OAuth app for meeting link creation
+- **Google Cloud project** with Gmail API and Google Calendar API enabled
+- A `credentials.json` OAuth 2.0 client file (see [Setup](#2-google-api-credentials) below)
+
+## Setup
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/<your-username>/email-agent.git
+git clone https://github.com/gnn9245/email-agent.git
 cd email-agent
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Google OAuth credentials
+### 2. Google API credentials
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials.
-2. Create an **OAuth 2.0 Client ID** (Desktop application).
-3. Download the JSON and save it as `credentials.json` in the project root.
-4. Enable the **Gmail API** and **Google Calendar API** for your project.
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
+2. Create a new project (or select an existing one).
+3. Enable the **Gmail API** and the **Google Calendar API**.
+4. Go to **Credentials → Create Credentials → OAuth 2.0 Client ID**.
+   - Application type: **Desktop app**.
+   - Download the JSON file and save it as `credentials.json` in the project root.
+5. Under **OAuth consent screen**, add your Google account as a test user.
 
-On first sign-in, the app will open a browser window for Google OAuth and save the token as `token.json`.
+### 3. Download the local model (required)
 
-### 3. Environment variables
+The default model is **Qwen 2.5 3B Instruct** (GGUF, ~2 GB). Download it into the `models/qwen/` directory:
 
-Create a `.env` file in the project root:
-
-```env
-# Required for Groq (default provider)
-GROQ_API_KEY=gsk_your_key_here
-
-# LLM provider: "groq" | "qwen_local_3b" | "qwen_local_7b"
-LLM_PROVIDER=groq
-
-# Optional: override default models
-# GROQ_MODEL=llama-3.3-70b-versatile
-# GROQ_FAST_MODEL=llama-3.1-8b-instant
-
-# Optional: Zoom integration
-# ZOOM_ACCOUNT_ID=your_account_id
-# ZOOM_CLIENT_ID=your_client_id
-# ZOOM_CLIENT_SECRET=your_client_secret
+```bash
+mkdir -p models/qwen
 ```
 
-### 4. Local Qwen models (optional)
+Download from Hugging Face: [Qwen2.5-3B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF)
 
-To use local inference instead of Groq:
+File: `qwen2.5-3b-instruct-q5_k_m.gguf` → place at `models/qwen/qwen2.5-3b-instruct-q5_k_m.gguf`
 
-1. Download GGUF models into `models/qwen/`:
-   - [Qwen 2.5 3B Instruct (Q5_K_M)](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF)
-   - [Qwen 2.5 7B Instruct (Q4_K_M)](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)
-2. Set `LLM_PROVIDER=qwen_local_3b` or `LLM_PROVIDER=qwen_local_7b` in `.env`.
+Or use the Hugging Face CLI:
+
+```bash
+pip install huggingface_hub
+huggingface-cli download Qwen/Qwen2.5-3B-Instruct-GGUF qwen2.5-3b-instruct-q5_k_m.gguf --local-dir models/qwen
+```
+
+### 4. Environment variables
+
+```bash
+cp .env.example .env
+```
+
+The defaults work out of the box with the local 3B model — no API keys needed for local inference.
 
 ### 5. Run
 
@@ -139,93 +90,90 @@ To use local inference instead of Groq:
 streamlit run app.py
 ```
 
-The app opens at `http://localhost:8501`. Click **Sign in** to authenticate with Google, then **Analyze inbox** to fetch and process your emails.
+On first launch the app opens a browser window to sign in with Google (OAuth). After authorising, click **Fetch new emails** to pull your inbox.
 
 ---
 
-## Usage
+## Optional upgrades
 
-### Basic workflow
+### Qwen 2.5 7B model
 
-1. **Sign in** — Authenticate with your Google account.
-2. **Analyze inbox** — Fetches up to 25 emails, runs the full LangGraph pipeline (summarize, categorize, flag, suggest actions).
-3. **Browse emails** — Click any email card to open it in the detail panel. View the full HTML body, thread context, and suggested quick actions.
-4. **Quick actions** — Click a suggested action (e.g., "Accept", "Decline") to auto-draft a reply. Edit the draft, then send.
-5. **Schedule** — Click a "Schedule:" action to propose meeting times from your calendar. Select a slot and optionally add a Zoom link.
-6. **Categories tab** — Manage labels, view learned rules, override the selected email's category, or get category suggestions.
-7. **Todo tab** — Quick-add tasks from email context.
+For better quality on complex emails, download the 7B model (~4.6 GB, split into two files):
 
-### Task-aware LLM routing
+Download from Hugging Face: [Qwen2.5-7B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)
 
-The system uses two models to optimize speed and cost:
+Files: `qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf` and `qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf` → place both in `models/qwen/`
 
-| Task | Model | Why |
-|------|-------|-----|
-| Categorize, Summarize, Extract entities, Flag urgent, Meeting extract | `llama-3.1-8b-instant` (fast) | Short, deterministic outputs |
-| Draft replies, Plan reply, Decide actions, Learn style | `llama-3.3-70b-versatile` (strong) | Requires nuanced reasoning |
+Then select **Qwen 2.5 7B (local)** from the model dropdown in the UI.
 
-### Keyboard shortcuts
+### Groq (hosted API)
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+Shift+K` | Retrain — wipes processed data and reprocesses all stored emails |
+For the fastest inference using hosted models:
+
+1. Get a free API key at [https://console.groq.com/](https://console.groq.com/).
+2. In `.env`:
+   ```
+   LLM_PROVIDER=groq
+   GROQ_API_KEY=gsk_your_key_here
+   ```
+3. Select **Groq (hosted)** from the model dropdown.
+
+Groq uses `llama-3.3-70b-versatile` for heavy tasks and `llama-3.1-8b-instant` for lightweight tasks by default.
+
+### Zoom integration
+
+To add Zoom meeting links when scheduling:
+
+1. Create a **Server-to-Server OAuth** app at [https://marketplace.zoom.us/](https://marketplace.zoom.us/).
+2. In `.env`:
+   ```
+   ZOOM_ACCOUNT_ID=your_account_id
+   ZOOM_CLIENT_ID=your_client_id
+   ZOOM_CLIENT_SECRET=your_client_secret
+   ```
 
 ---
+
+## Project structure
+
+```
+app.py                      # Streamlit UI (entry point)
+config.py                   # LLM configuration and task profiles
+agent/
+  langgraph_pipeline.py     # Main email processing graph (parallel)
+  quick_actions_graph.py    # Quick action suggestion graph (parallel)
+  drafting_graph.py         # Reply drafting graph (plan→draft→critique→finalise)
+  categorizer.py            # Email categorisation (heuristics + LLM)
+  summarizer.py             # Email summarisation
+  meeting_extractor.py      # Meeting/event detection
+  urgent_detector.py        # Urgency detection (keyword-based)
+  decision_suggester.py     # Legacy decision suggester
+  drafter.py                # Core reply drafting
+  style_learner.py          # Writing style analysis
+  profile.py                # User profile loader
+  email_memory.py           # SQLite storage, todos, labels, sender history
+  memory_store.py           # Email archive/memory helpers
+  llm.py                    # LLM provider abstraction (local + Groq)
+  text_cleaner.py           # HTML/email body cleaning
+  scheduling.py             # Calendar slot finder
+  scheduling_graph.py       # Scheduling graph
+  delegation.py             # Task delegation helpers
+tools/
+  gmail_tools.py            # Gmail API wrapper (fetch, send, archive)
+  calendar_tools.py         # Google Calendar API wrapper
+  google_auth.py            # OAuth 2.0 authentication flow
+  zoom_tools.py             # Zoom meeting creation
+data/                       # Auto-generated at runtime (gitignored)
+models/
+  qwen/                     # Local GGUF model files (gitignored)
+```
 
 ## Tests
 
 ```bash
-# Run all tests
 python -m pytest tests/ -v
-
-# Run a specific test suite
-python -m pytest tests/test_categories_integration.py -v
-python -m pytest tests/test_memory_integration.py -v
-python -m pytest tests/test_scheduling_integration.py -v
 ```
-
-131 tests cover email storage, cross-email linking, memory context, calendar operations, meeting extraction, scheduling proposals, category labels, rules, overrides, and LLM integration.
-
----
-
-## Project Structure Details
-
-### LangGraph Pipeline
-
-The core pipeline is a linear LangGraph graph defined in `agent/langgraph_pipeline.py`:
-
-```
-fetch_inbox → learn_style → store_raw → summarize → categorize
-→ postprocess_categories → flag_urgent → enrich_context
-→ related_context → suggest_decisions → delegation → log_memory
-→ store_processed → build_links → END
-```
-
-Each node is a pure function that reads from and writes to a shared `EmailAgentState` dict. The pipeline supports three modes:
-- **Fresh fetch** — Fetches new emails from Gmail, processes only those not already in the DB.
-- **Load from memory** — Instantly loads all processed emails from SQLite (no API calls).
-- **Retrain** — Wipes processed data, reprocesses all stored raw emails through the full pipeline.
-
-### SQLite Schema
-
-All persistent data lives in `data/memory.db`:
-
-| Table | Purpose |
-|-------|---------|
-| `emails` | Raw email storage (gmail_id, subject, sender, body, etc.) |
-| `email_processed` | LLM results (summary, category, needs_action, decision_options) |
-| `email_links` | Cross-email relationships (same sender, shared keywords) |
-| `category_labels` | User-defined + system category labels (slug, color, enabled) |
-| `category_rules` | Learned categorization rules (match_type, match_value, label_slug) |
-| `todo_items` | Task list items |
-| `knowledge_base` | Extracted entities and facts |
-| `user_profile` | Identity and preference storage |
-| `memory` | Long-term notes and logs |
-| `delegation_rules` | Forwarding/delegation patterns |
-| `task_state` | Reserved for future autonomous workflows |
-
----
 
 ## License
 
-This project is for educational and personal use. See individual dependency licenses for third-party terms.
+MIT

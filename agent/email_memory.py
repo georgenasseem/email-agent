@@ -138,7 +138,9 @@ def store_processed_email(email: dict) -> None:
     if not gid:
         return
     options = email.get("decision_options")
-    options_json = json.dumps(options) if options else None
+    # Always serialize — even [] — so we can distinguish "processed but no actions"
+    # from "never processed" (NULL).
+    options_json = json.dumps(options) if options is not None else None
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -182,7 +184,9 @@ def store_processed_emails(emails: List[dict]) -> None:
         if not gid:
             continue
         options = e.get("decision_options")
-        options_json = json.dumps(options) if options else None
+        # Always serialize — even [] — so we can distinguish "processed but no actions"
+        # from "never processed" (NULL).
+        options_json = json.dumps(options) if options is not None else None
         rows.append((
             gid,
             e.get("summary", ""),
@@ -227,16 +231,16 @@ def get_processed_email_ids() -> Set[str]:
         return {row[0] for row in cur.fetchall()}
 
 
-def load_all_processed_emails() -> List[dict]:
+def load_all_processed_emails(limit: int = 0) -> List[dict]:
     """Load all emails with their processed data merged, newest first.
 
     Joins emails + email_processed so the result matches the runtime email dict format.
+    If *limit* > 0 only the newest *limit* emails are returned.
     """
     init_db()
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute(
-            """
+        query = """
             SELECT
                 e.gmail_id, e.thread_id, e.subject, e.sender, e.date,
                 e.internal_date, e.body, e.clean_body, e.body_html, e.snippet,
@@ -246,8 +250,10 @@ def load_all_processed_emails() -> List[dict]:
             LEFT JOIN email_processed p ON e.gmail_id = p.gmail_id
             WHERE COALESCE(p.archived, 0) = 0
             ORDER BY e.internal_date DESC
-            """
-        )
+        """
+        if limit > 0:
+            query += f" LIMIT {int(limit)}"
+        cur.execute(query)
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
     result = []
@@ -258,12 +264,17 @@ def load_all_processed_emails() -> List[dict]:
         # Convert needs_action int → bool
         d["needs_action"] = bool(d.get("needs_action"))
         # Parse decision_options JSON
+        # NULL (never processed) → decision_options stays absent (None) so backfill can detect it
+        # "[]" (processed, no actions) → decision_options = [] — won't re-backfill
+        # "[...]" (has actions) → decision_options = [...]
         opts_json = d.pop("decision_options_json", None)
-        if opts_json:
+        if opts_json is not None:
             try:
                 d["decision_options"] = json.loads(opts_json)
             except Exception:
                 d["decision_options"] = []
+        else:
+            d["decision_options"] = None  # Explicitly None = never processed
         result.append(d)
     return result
 
@@ -394,11 +405,14 @@ def get_linked_emails(gmail_id: str, limit: int = 10) -> List[dict]:
         d["id"] = d.pop("gmail_id")
         d["needs_action"] = bool(d.get("needs_action"))
         opts_json = d.pop("decision_options_json", None)
-        if opts_json:
+        opts_json = d.pop("decision_options_json", None)
+        if opts_json is not None:
             try:
                 d["decision_options"] = json.loads(opts_json)
             except Exception:
-                pass
+                d["decision_options"] = []
+        else:
+            d["decision_options"] = None
         result.append(d)
     return result
 
@@ -535,6 +549,41 @@ def get_sender_history(sender_email: str, exclude_id: str = "", limit: int = 5) 
     return result
 
 
+def get_greeting_for_contact(sender_email: str) -> str:
+    """Look up how the user previously addressed this specific contact.
+
+    Searches the user's sent emails for replies to this sender and extracts
+    the greeting line used. Returns the greeting (e.g. 'Dear Professor Salam')
+    or empty string if no history found.
+    """
+    try:
+        from tools.gmail_tools import fetch_sent_to_contact
+        sent = fetch_sent_to_contact(sender_email, max_results=5)
+        if not sent:
+            return ""
+
+        greeting_regex = re.compile(
+            r"^(hi|hello|hey|dear|salam|assalamu|as-salamu)\b.*",
+            re.IGNORECASE,
+        )
+        greetings: list[str] = []
+        for body in sent:
+            if not body:
+                continue
+            for line in (body or "").splitlines():
+                stripped = line.strip()
+                if stripped and greeting_regex.match(stripped):
+                    # Clean up trailing comma
+                    greetings.append(stripped.rstrip(","))
+                    break
+        if greetings:
+            # Return the most recent greeting used
+            return greetings[0]
+    except Exception:
+        pass
+    return ""
+
+
 # ─── Retrain / wipe processed data ─────────────────────────────────────────
 
 
@@ -548,6 +597,21 @@ def wipe_processed_data() -> None:
         cur = conn.cursor()
         cur.execute("DELETE FROM email_processed")
         cur.execute("DELETE FROM email_links")
+        cur.execute("DELETE FROM memory WHERE kind IN ('category', 'delegation_suggestion')")
+        conn.commit()
+
+
+def wipe_all_data() -> None:
+    """Delete ALL stored data — raw emails, processed results, links, and memory.
+
+    Used when resetting the agent to start fresh with only a small batch.
+    """
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM email_processed")
+        cur.execute("DELETE FROM email_links")
+        cur.execute("DELETE FROM emails")
         cur.execute("DELETE FROM memory WHERE kind IN ('category', 'delegation_suggestion')")
         conn.commit()
 
@@ -682,9 +746,10 @@ def search_emails_for_entity(entity: str, limit: int = 5) -> List[dict]:
 # ─── Custom category labels & rules (Phase 6) ──────────────────────────────
 
 # Default system categories that are always available alongside user labels
-SYSTEM_CATEGORIES = ["important", "informational", "newsletter"]
+SYSTEM_CATEGORIES = ["action-required", "important", "informational", "newsletter"]
 
 DEFAULT_LABEL_COLORS = {
+    "action-required": "#ef4444",
     "important": "#f59e0b",
     "informational": "#94a3b8",
     "newsletter": "#8b5cf6",
@@ -738,6 +803,7 @@ def ensure_default_labels() -> None:
         _max_pos_row = cur.fetchone()
         _next_pos = (_max_pos_row[0] or -1) + 1 if _max_pos_row and _max_pos_row[0] is not None else 0
         defaults = [
+            ("action-required", "Action Required", DEFAULT_LABEL_COLORS["action-required"], "Important emails with actionable quick actions", 1),
             ("important", "Important", DEFAULT_LABEL_COLORS["important"], "Requires a response or task", 1),
             ("informational", "Informational", DEFAULT_LABEL_COLORS["informational"], "Informational only, no action needed", 1),
             ("newsletter", "Newsletter", DEFAULT_LABEL_COLORS["newsletter"], "Marketing & newsletters", 1),
@@ -843,12 +909,18 @@ def update_label(slug: str, display_name: str = None, color: str = None, descrip
 
 
 def delete_label(slug: str) -> None:
-    """Delete a category label. Also cleans up any rules pointing to it."""
+    """Delete a category label. Also cleans up rules and strips tag from emails."""
     init_db()
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM category_rules WHERE label_slug = ?", (slug,))
         cur.execute("DELETE FROM category_labels WHERE slug = ?", (slug,))
+        # Strip the deleted tag from all emails that have it
+        cur.execute("SELECT gmail_id, category FROM email_processed WHERE category LIKE ?", (f"%{slug}%",))
+        for (gid, cat_raw) in cur.fetchall():
+            tags = [t.strip() for t in (cat_raw or "").split(",") if t.strip() and t.strip() != slug]
+            new_cat = ",".join(tags) if tags else "informational"
+            cur.execute("UPDATE email_processed SET category = ? WHERE gmail_id = ?", (new_cat, gid))
         conn.commit()
 
 
@@ -1157,73 +1229,154 @@ def record_category_override(email: dict, new_label_slug: str) -> None:
 def propose_categories_from_history(min_sender_count: int = 2) -> List[dict]:
     """Analyze stored emails and propose new category labels based on content patterns.
 
-    Groups emails by recurring subject keywords (not by sender) to propose
-    content-based categories like "Meetings", "Invoices", "Reports", etc.
-
-    Args:
-        min_sender_count: Minimum number of emails a keyword must appear in
-                          to be considered for a proposal (re-used param name
-                          for backwards compatibility).
+    Uses sender-domain grouping and LLM-based topic extraction to propose
+    meaningful categories like "Hackathon", "Research", "Club Events", etc.
+    Avoids generic keywords and seasonal/temporal words.
 
     Returns list of dicts: {proposed_name, reason, match_type, match_value, example_subjects, count}.
     """
     init_db()
     proposals = []
 
-    _stop_words = {
-        "the", "and", "for", "are", "but", "not", "you", "all", "can",
-        "had", "her", "was", "one", "our", "out", "has", "his", "how",
-        "its", "may", "new", "now", "old", "see", "way", "who", "did",
-        "get", "let", "say", "she", "too", "use", "your", "this", "that",
-        "with", "have", "from", "they", "been", "said", "each", "which",
-        "will", "very", "when", "what", "just", "about", "more", "would",
-        "make", "like", "been", "than", "them", "some", "could", "other",
-        "into", "then", "these", "also", "please", "hello", "dear", "here",
-        "fwd", "fw", "subject",
-    }
-
     with get_connection() as conn:
         cur = conn.cursor()
 
-        # Fetch all email subjects
-        cur.execute("SELECT subject FROM emails WHERE subject IS NOT NULL AND subject != ''")
+        # ── Strategy 1: Group by sender domain ──
+        cur.execute(
+            "SELECT sender, subject FROM emails WHERE sender IS NOT NULL AND subject IS NOT NULL AND subject != ''"
+        )
         rows = cur.fetchall()
-
         if not rows:
             return []
 
-        # Count keyword frequency across emails
         import re as _re
-        from collections import Counter
-        keyword_counts: Counter = Counter()
-        keyword_subjects: dict = {}  # keyword -> list of example subjects
+        from collections import Counter, defaultdict
 
-        for (subject_raw,) in rows:
+        domain_subjects: dict = defaultdict(list)
+        for sender_raw, subject in rows:
+            sender = (sender_raw or "").lower()
+            # Extract email address
+            m = _re.search(r"<([^>]+)>", sender)
+            addr = m.group(1) if m else (sender.strip() if "@" in sender else "")
+            if addr and "@" in addr:
+                domain = addr.split("@", 1)[1]
+                domain_subjects[domain].append(subject.strip())
+
+        # Get existing rules to skip already-covered patterns
+        cur.execute("SELECT match_type, match_value FROM category_rules")
+        existing_rules = {(row[0], row[1].lower()) for row in cur.fetchall()}
+
+        # Get existing label slugs to skip duplicates
+        existing_slugs = {lb["slug"] for lb in get_all_labels()}
+
+        # Domain-based proposals: domains with many emails that don't have rules
+        for domain, subjects in sorted(domain_subjects.items(), key=lambda x: -len(x[1])):
+            if len(subjects) < min_sender_count:
+                continue
+            if ("sender_domain", domain) in existing_rules:
+                continue
+            # Skip common email providers (personal emails, not organizational)
+            _generic_domains = {
+                "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+                "icloud.com", "aol.com", "protonmail.com", "live.com",
+                "mail.com", "zoho.com", "yandex.com",
+            }
+            if domain in _generic_domains:
+                continue
+
+            example_subjs = " | ".join(subjects[:3])
+            # Use the domain's organization name as a proposal hint
+            org_part = domain.split(".")[0]
+            proposals.append({
+                "proposed_name": org_part.capitalize(),
+                "reason": f"{len(subjects)} emails from {domain}",
+                "match_type": "sender_domain",
+                "match_value": domain,
+                "example_subjects": example_subjs[:200],
+                "count": len(subjects),
+            })
+            if len(proposals) >= 10:
+                break
+
+        # ── Strategy 2: Topic clustering via recurring MEANINGFUL keywords ──
+        # Only use multi-word ngrams and proper nouns, skip generic single words
+        _stop_words = {
+            "the", "and", "for", "are", "but", "not", "you", "all", "can",
+            "had", "her", "was", "one", "our", "out", "has", "his", "how",
+            "its", "may", "new", "now", "old", "see", "way", "who", "did",
+            "get", "let", "say", "she", "too", "use", "your", "this", "that",
+            "with", "have", "from", "they", "been", "said", "each", "which",
+            "will", "very", "when", "what", "just", "about", "more", "would",
+            "make", "like", "been", "than", "them", "some", "could", "other",
+            "into", "then", "these", "also", "please", "hello", "dear", "here",
+            "fwd", "subject", "update", "reminder", "action", "check", "form",
+            "info", "note", "notice", "important", "urgent", "follow",
+            # Temporal / seasonal words
+            "spring", "summer", "fall", "winter", "autumn",
+            "january", "february", "march", "april", "june", "july",
+            "august", "september", "october", "november", "december",
+            "monday", "tuesday", "wednesday", "thursday", "friday",
+            "saturday", "sunday", "week", "month", "year", "today",
+            "tomorrow", "yesterday", "morning", "evening", "night",
+            "2024", "2025", "2026", "2027",
+            # Generic action words
+            "required", "needed", "request", "response", "reply",
+            "meeting", "invitation", "announce", "announcement",
+        }
+
+        keyword_counts: Counter = Counter()
+        keyword_subjects: dict = {}
+
+        for (sender_raw, subject_raw) in rows:
             subject = (subject_raw or "").strip()
-            words = _re.findall(r"[a-zA-Z]{3,}", subject.lower())
-            unique_words = set(w for w in words if w not in _stop_words and len(w) >= 4)
+            # Extract meaningful words (4+ chars) from subject — both proper nouns
+            # and standard lowercase words, to catch topics like "hackathon",
+            # "research", "internship" that may appear in any casing.
+            all_words = _re.findall(r"\b[A-Za-z]{4,}\b", subject)
+            unique_words = set(
+                w.lower() for w in all_words
+                if w.lower() not in _stop_words
+            )
+            # Also extract meaningful 2-word phrases (bigrams)
+            words_list = [w for w in _re.findall(r"\b[A-Za-z]{3,}\b", subject) if w.lower() not in _stop_words]
+            for j in range(len(words_list) - 1):
+                bigram = f"{words_list[j]} {words_list[j+1]}"
+                bigram_lower = bigram.lower()
+                if len(bigram_lower) >= 8:  # meaningful bigram length
+                    unique_words.add(bigram_lower)
+
             for w in unique_words:
                 keyword_counts[w] += 1
                 if w not in keyword_subjects:
-                    keyword_subjects[w] = []
-                if len(keyword_subjects[w]) < 3:
-                    keyword_subjects[w].append(subject[:80])
+                    # Use original case for display when available
+                    display = w.title()
+                    # For single words, try to find original cased version
+                    for orig in all_words:
+                        if orig.lower() == w:
+                            display = orig if orig[0].isupper() else orig.title()
+                            break
+                    keyword_subjects[w] = {"display": display, "subjects": []}
+                if len(keyword_subjects[w]["subjects"]) < 3:
+                    keyword_subjects[w]["subjects"].append(subject[:80])
 
-        # Get existing rules to skip already-covered keywords
+        # Get existing keyword rules
         cur.execute("SELECT match_value FROM category_rules WHERE match_type = 'subject_keyword'")
         existing_keywords = {row[0].lower() for row in cur.fetchall()}
 
-        # Propose keywords that appear in enough emails and don't have rules yet
         for kw, cnt in keyword_counts.most_common(30):
-            if cnt < min_sender_count:
+            if cnt < min_sender_count:  # use same min as sender-domain (default 2)
                 break
             if kw in existing_keywords:
                 continue
+            display_name = keyword_subjects[kw]["display"]
+            slug = _slugify(display_name)
+            if slug in existing_slugs:
+                continue
 
-            example_subjs = " | ".join(keyword_subjects.get(kw, []))
+            example_subjs = " | ".join(keyword_subjects[kw]["subjects"])
             proposals.append({
-                "proposed_name": kw.capitalize(),
-                "reason": f"Keyword '{kw}' appears in {cnt} emails",
+                "proposed_name": display_name,
+                "reason": f"Topic '{display_name}' appears in {cnt} emails",
                 "match_type": "subject_keyword",
                 "match_value": kw,
                 "example_subjects": example_subjs[:200],
@@ -1239,9 +1392,9 @@ def propose_categories_from_history(min_sender_count: int = 2) -> List[dict]:
 def filter_proposals_with_llm(proposals: List[dict]) -> List[dict]:
     """Use a fast LLM call to prune bad category proposals.
 
-    Filters out generic words (e.g. 'week', 'today'), fragments of proper
-    nouns (e.g. 'dhabi'), and anything that wouldn't make a sensible email
-    category name.  Returns the subset of *proposals* the LLM approved.
+    Filters out generic words, redundant categories, seasonal terms,
+    and anything that wouldn't make a sensible email category.
+    Returns the subset of *proposals* the LLM approved.
     """
     if not proposals:
         return []
@@ -1250,26 +1403,38 @@ def filter_proposals_with_llm(proposals: List[dict]) -> List[dict]:
         from langchain_core.messages import SystemMessage, HumanMessage
         import json as _json
 
-        names = [p["proposed_name"] for p in proposals]
+        # Build context: name + example subjects + existing categories
+        existing_cats = [lb["display_name"] for lb in get_all_labels()]
+        items = []
+        for p in proposals:
+            items.append({
+                "name": p["proposed_name"],
+                "examples": p.get("example_subjects", ""),
+                "count": p.get("count", 0),
+            })
+
         system = (
-            "You are a filter for email category suggestions. "
-            "The user will give you a JSON list of proposed category names extracted from email subjects. "
-            "Return ONLY a JSON array containing the names that would make GOOD email categories. "
-            "Remove:\n"
-            "- Generic time words (week, today, tomorrow, monday, etc.)\n"
-            "- Common filler words or fragments (update, form, action, check, etc.)\n"
-            "- Fragments of proper nouns that are meaningless on their own (e.g. 'dhabi' from 'Abu Dhabi')\n"
-            "- Anything too vague to be a useful category\n"
-            "Keep names that represent a clear, meaningful topic (e.g. Hackathon, Research, Students, Mentors, Proposal, Internship, Finance).\n"
+            "You are a filter for email category suggestions.\n"
+            "The user will give you a JSON list of proposed categories with example email subjects.\n"
+            f"EXISTING categories (do NOT approve duplicates or synonyms of these): {_json.dumps(existing_cats)}\n\n"
+            "Return ONLY a JSON array of the NAMES that would make GOOD, USEFUL email categories.\n\n"
+            "REMOVE:\n"
+            "- Generic/vague words (update, form, action, check, info, notice, spring, etc.)\n"
+            "- Time/season words (week, today, monday, spring, 2025, etc.)\n"
+            "- Words that are redundant with existing categories (e.g. 'Announcements' is redundant with 'Newsletter'/'Informational')\n"
+            "- Words that only appear because of seasonal context, not because they represent an actual topic\n"
+            "- Organization domain names that aren't meaningful as categories\n"
+            "- Fragments of proper nouns meaningless on their own\n\n"
+            "KEEP only names that represent a clear, distinct, meaningful email topic that would help organize a mailbox "
+            "(e.g. Hackathon, Research, Advising, Internship, Finance, Club-name).\n"
             "Output ONLY the JSON array. No explanation."
         )
-        llm = get_llm(task="decide")  # fast/light model
+        llm = get_llm(task="decide")
         raw = llm.invoke(
-            [SystemMessage(content=system), HumanMessage(content=_json.dumps(names))],
+            [SystemMessage(content=system), HumanMessage(content=_json.dumps(items))],
             max_tokens=300,
         )
         text = (raw if isinstance(raw, str) else raw.content).strip()
-        # Extract JSON array
         import re as _re
         text = _re.sub(r"^```[a-zA-Z]*\s*", "", text)
         text = _re.sub(r"```\s*$", "", text).strip()
@@ -1280,5 +1445,4 @@ def filter_proposals_with_llm(proposals: List[dict]) -> List[dict]:
         good_names = set(n.lower() for n in _json.loads(text) if isinstance(n, str))
         return [p for p in proposals if p["proposed_name"].lower() in good_names]
     except Exception:
-        # If LLM fails, return originals unfiltered
         return proposals

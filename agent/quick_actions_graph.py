@@ -1,21 +1,23 @@
 """Dedicated LangGraph for intelligent quick-action suggestions.
 
+Architecture: Quick Actions answer "WHAT should I do?" (suggest actions).
+             Drafting answers "HOW do I do it?" (compose the response).
+
 Runs multiple analysis nodes to produce high-quality,
 context-aware actions for a single email:
 
 1. gather_context    — Pull memory, sender history, existing todos.
-2. reply_analysis    — Should the user reply? What are ALL reasonable reply options?
+2. reply_analysis    — Should the user reply? What are the options?
+                       Meeting/scheduling actions are reply-type with meeting flags.
 3. todo_analysis     — Extract actionable tasks. Strict dedup against existing todos.
-4. meeting_analysis  — Does the email mention a meeting or scheduling need?
-5. merge_actions     — Deduplicate, validate, and rank the final suggestions.
+4. merge_actions     — Deduplicate, validate, and rank the final suggestions.
 
 Key design principles:
-- Reply options always come in pairs (accept/decline, confirm/reject)
-- Reply descriptions are detailed and specific
-- Todos must be concrete with deadlines when available
-- Meeting detection is generous — better to suggest than miss
-- No "Archive" quick-action — there is already a permanent Archive button in the UI.
-  Instead, when no actions are warranted, we return a status message.
+- Actions are SHORT labels (what to do), not detailed instructions
+- Meeting actions are integrated into reply options with meeting_action flags
+- After clicking, the system decides HOW to execute (draft, schedule, etc.)
+- No "Reply:", "Todo:", "Schedule:" prefixes — type field handles routing
+- Color coding in UI: orange=reply, purple=todo, grey=custom
 """
 import json
 import logging
@@ -42,11 +44,10 @@ class QuickActionState(TypedDict, total=False):
     memory_context: str
     sender_history: str
     existing_todos: list[str]
-    reply_options: list[str]
-    todo_options: list[str]
-    meeting_options: list[str]
-    no_action_message: str          # replaces archive_option
-    final_options: list[str]
+    reply_options: list[dict]       # [{type, label, context, has_meeting, meeting_action}]
+    todo_options: list[dict]        # [{type, label, context}]
+    no_action_message: str
+    final_options: list[dict]       # merged + ranked actions
 
 
 # ─── Helper: extract sender address ────────────────────────────────────────
@@ -93,15 +94,13 @@ def gather_context_node(state: QuickActionState) -> dict:
     }
 
 
-# ─── Node 1: Reply analysis ────────────────────────────────────────────────
+# ─── Node 1: Reply analysis (includes meeting detection) ───────────────────
 
 def reply_analysis_node(state: QuickActionState) -> dict:
-    """Determine if a reply is warranted and suggest ALL reasonable reply options.
+    """Determine if a reply is warranted and suggest short action labels.
 
-    Key improvements:
-    - Always suggests PAIRS of opposing options (accept & decline, confirm & deny)
-    - Reply descriptions are detailed and specific
-    - Only skips replies for truly automated / noreply senders
+    Meeting/scheduling actions are integrated here — they are reply-type
+    actions with has_meeting=True and a meeting_action flag.
     """
     email = state.get("email") or {}
     subject = (email.get("subject") or "")[:150]
@@ -112,7 +111,7 @@ def reply_analysis_node(state: QuickActionState) -> dict:
     memory_ctx = state.get("memory_context", "")
     sender_hist = state.get("sender_history", "")
 
-    # Only skip truly automated senders — do NOT skip based on category alone
+    # Only skip truly automated senders
     sender_lower = sender.lower()
     if any(s in sender_lower for s in ["noreply", "no-reply", "mailer-daemon", "donotreply"]):
         return {"reply_options": []}
@@ -120,25 +119,62 @@ def reply_analysis_node(state: QuickActionState) -> dict:
     llm = get_llm(task="decide")
     parser = StrOutputParser()
 
-    system = """You analyze emails and suggest SPECIFIC reply options the user might want to send.
+    system = """You analyze emails and suggest SHORT REPLY action labels — things the user would SEND BACK to the sender.
+
+A REPLY is a message the user sends to the email sender. It is NOT a personal task.
+
+Each action is a JSON object with:
+- "label": SHORT action text (2-6 words). What the user sees on a button.
+- "context": Brief hidden context for the AI drafter — include WHO is involved, WHAT the topic is, and any key details/dates (1-2 sentences).
+- "has_meeting": true if the email is ABOUT a future meeting, event, or scheduling topic.
+- "meeting_action": "accept" | "decline" | "reschedule" | null. Only set when has_meeting is true.
 
 CRITICAL RULES:
-1. ALWAYS suggest BOTH sides of any decision. If suggesting "Accept the meeting invitation for March 5th", ALSO suggest "Decline the meeting invitation for March 5th". If suggesting "Confirm attendance at the workshop", ALSO suggest "Decline — unable to attend the workshop".
-2. Each reply description MUST be detailed and specific — include names, dates, topics from the email. BAD: "Confirm attendance". GOOD: "Confirm attendance at the NYU Career Fair on March 10th".
-3. Only suggest replies that are CONVERSATIONAL messages TO the sender. NOT personal notes.
-4. Do NOT suggest replies for: automated notifications, receipts, system alerts, mass newsletters, noreply senders.
-5. DO suggest replies for: invitations, requests, questions, proposals, meeting requests, RSVPs, confirmations, event registrations, collaborative discussions.
-6. Maximum 4 reply suggestions (usually 2 pairs of opposing options).
-7. Keep descriptions as email-reply actions: "Accept...", "Decline...", "Ask about...", "Confirm...", "Request...".
+1. REPLIES are things you would SEND to the person. "Acknowledge" or "Confirm receipt" are replies. "Prepare a presentation" is NOT a reply — it's a task.
+2. Do NOT suggest personal tasks/to-do items as replies. These are handled separately.
+   BAD replies: "Prepare presentation", "Review document", "Complete assignment", "Study for exam".
+   GOOD replies: "Acknowledge", "Confirm attendance", "Ask for details", "Decline politely".
+3. Set has_meeting=true when the email is ABOUT a future meeting or event. This includes:
+   - Meeting invitations ("Can we meet Thursday?")
+   - Meeting reminders ("Don't forget our meeting tomorrow")
+   - Meeting issues ("The meeting is not in my calendar")
+   - Scheduling discussions ("Are you free Friday?")
+   - Event invitations ("You're invited to the workshop on March 5")
+4. When has_meeting=true, ALWAYS suggest accept, decline, AND reschedule options (3 actions).
+5. References to PAST meetings used as context only ("during our last meeting", "as we discussed") do NOT count. Only set has_meeting=true when a FUTURE meeting is the topic.
+6. For non-meeting emails, provide 1-3 SPECIFIC reply options. Avoid generic labels.
+   - If the email asks a QUESTION, suggest answering it: "Confirm availability", "Share the file", "Provide update".
+   - If the email requests something, offer to agree or push back: "Agree to help", "Can't right now".
+   - If the email is sharing info that benefits from acknowledgment: "Thank them", "Acknowledge".
+7. Do NOT suggest actions for: automated notifications, receipts, system alerts, newsletters, marketing emails.
+8. For emails that are purely FYI with no reply expected, return an empty array [].
+9. Maximum 4 reply actions total.
+10. Make CONTEXT rich — the drafter uses it to compose the full reply. Include the sender's name, topic, and key details.
 
-Output a JSON array of reply description strings. Empty array [] if truly no reply warranted.
+Output ONLY a JSON array of objects. No other text.
 
 EXAMPLES:
-Email about a hackathon registration deadline → ["Confirm registration for the NYUAD Hackathon by the Feb 27th deadline", "Decline — unable to participate in the hackathon"]
-Email inviting to a meeting → ["Accept the meeting invitation for Thursday 3pm", "Decline the meeting — suggest alternative time"]
-Email asking for a project update → ["Provide the requested project status update", "Ask for more time to prepare the update"]
-Email about shelter-in-place alert → []
-Newsletter → []"""
+Meeting invitation for next Thursday → [
+  {"label": "Accept meeting", "context": "Accept meeting with Prof. Smith about research proposal, Thursday 3pm", "has_meeting": true, "meeting_action": "accept"},
+  {"label": "Decline meeting", "context": "Decline meeting with Prof. Smith on Thursday — unable to attend", "has_meeting": true, "meeting_action": "decline"},
+  {"label": "Suggest different time", "context": "Reschedule meeting with Prof. Smith, propose alternative time for research discussion", "has_meeting": true, "meeting_action": "reschedule"}
+]
+Email asking "Can you send me the report?" → [
+  {"label": "Send the report", "context": "Agree to send the requested report to Sarah about the Q4 analysis", "has_meeting": false, "meeting_action": null},
+  {"label": "Need more time", "context": "Let Sarah know the report needs more time before sending", "has_meeting": false, "meeting_action": null}
+]
+Email asking for help with a project → [
+  {"label": "Agree to help", "context": "Agree to help Alex with the database migration project", "has_meeting": false, "meeting_action": null},
+  {"label": "Too busy right now", "context": "Politely decline helping Alex due to current workload", "has_meeting": false, "meeting_action": null}
+]
+Professor asking to review a draft → [
+  {"label": "Confirm will review", "context": "Confirm to Prof. Lee that you will review the paper draft by the deadline", "has_meeting": false, "meeting_action": null},
+  {"label": "Ask for extension", "context": "Request more time from Prof. Lee to review the paper draft", "has_meeting": false, "meeting_action": null}
+]
+Reminder about upcoming deadline → [
+  {"label": "Acknowledge reminder", "context": "Confirm receipt of the deadline reminder and confirm on track", "has_meeting": false, "meeting_action": null}
+]
+Automated receipt, newsletter, or FYI → []"""
 
     prompt = f"""From: {sender}
 Subject: {subject}
@@ -148,7 +184,7 @@ Thread: {thread_ctx}
 {memory_ctx}
 {sender_hist}
 
-What replies should the user consider? Include BOTH accepting and declining options where applicable. Be specific with names, dates, and details from the email. (JSON array only):"""
+Suggest reply actions the user might want to send. Be SPECIFIC to the email content. Keep labels SHORT (2-6 words). Include meeting accept/decline/reschedule if applicable. (JSON array only):"""
 
     try:
         raw = (llm | parser).invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
@@ -157,9 +193,22 @@ What replies should the user consider? Include BOTH accepting and declining opti
         if isinstance(options, list):
             results = []
             for o in options:
-                desc = str(o).strip()
-                if desc:
-                    results.append(f"Reply: {desc}")
+                if not isinstance(o, dict):
+                    continue
+                label = str(o.get("label", "")).strip()
+                if not label:
+                    continue
+                action = {
+                    "type": "reply",
+                    "label": label,
+                    "context": str(o.get("context", "")).strip(),
+                    "has_meeting": bool(o.get("has_meeting", False)),
+                    "meeting_action": o.get("meeting_action") if o.get("has_meeting") else None,
+                }
+                # Validate meeting_action values
+                if action["meeting_action"] not in (None, "accept", "decline", "reschedule"):
+                    action["meeting_action"] = None
+                results.append(action)
             return {"reply_options": results[:4]}
     except Exception as e:
         logger.debug("Reply analysis error: %s", e)
@@ -169,13 +218,7 @@ What replies should the user consider? Include BOTH accepting and declining opti
 # ─── Node 2: Todo analysis ─────────────────────────────────────────────────
 
 def todo_analysis_node(state: QuickActionState) -> dict:
-    """Extract concrete, actionable tasks with deadlines. Strict dedup.
-
-    Key improvements:
-    - Tasks must include deadlines / specifics from the email
-    - Stricter duplicate detection (both fuzzy + existing list in prompt)
-    - Avoids vague actions like "review email" or "check document"
-    """
+    """Extract concrete, actionable tasks with deadlines. Strict dedup."""
     email = state.get("email") or {}
     subject = (email.get("subject") or "")[:150]
     body = (email.get("clean_body") or email.get("body") or email.get("snippet") or "")[:1500]
@@ -189,30 +232,44 @@ def todo_analysis_node(state: QuickActionState) -> dict:
     if existing_todos:
         existing_block = "\n\nEXISTING TODO ITEMS (do NOT suggest anything similar to these — even if worded differently):\n" + "\n".join(f"- {t}" for t in existing_todos[:15])
 
-    system = f"""You extract actionable tasks from emails and return them as a JSON array.
+    system = f"""You extract actionable PERSONAL TASKS from emails — things the user needs to DO (not send).
+
+A TASK is something the user does on their own: prepare, study, submit, review, complete, write, etc.
+A task is NOT a reply to the sender — replies are handled separately.
+
+Each task is a JSON object with:
+- "label": SHORT task description (3-8 words). What the user sees on a button. INCLUDE DEADLINES when mentioned.
+- "context": Fuller description with specific details, deadlines, links, and relevant info from the email (1-2 sentences).
 
 CRITICAL RULES:
-1. Each task MUST be a concrete, specific action with details from the email (names, deadlines, links, amounts).
-2. Include deadlines when mentioned. BAD: "Submit form". GOOD: "Submit hackathon speaker form by Feb 27th 11:59 PM EST".
-3. Do NOT suggest vague tasks: "check the email", "review this", "look into it", "follow up".
-4. Do NOT suggest tasks that duplicate or overlap with existing todos, even if worded differently.
-5. Only suggest tasks that require the USER's action — not things the sender will do.
+1. Only extract tasks the USER personally needs to do. NOT tasks someone else is doing.
+2. Labels must be SHORT but SPECIFIC. Always include deadlines or dates when the email mentions them.
+   BAD: "Submit form". GOOD: "Submit hackathon form by Feb 27".
+   BAD: "Review this". GOOD: "Review proposal draft by Monday".
+   BAD: "Check grades". GOOD: "Check posted final grades on portal".
+3. Do NOT suggest "send a reply", "respond to email", "acknowledge" — those are replies, not tasks.
+4. Do NOT suggest vague tasks: "check the email", "look into it", "follow up".
+5. Do NOT duplicate existing todos (see below if any).
 6. Maximum 3 tasks.
-7. Do NOT create todo items for newsletters or automated notifications unless they contain a specific deadline or required action.{existing_block}
+7. Capture EVERY obviously actionable item: "prepare X", "submit Y", "complete Z", "register for W", "review by date".
+8. If the email mentions a document to read, a form to fill, a link to visit, or a deadline to meet — those are tasks.
+9. Do NOT create tasks for newsletters or automated notifications unless they have specific personal deadlines.
+10. For multi-part requests, extract each distinct task separately (up to the 3 limit).{existing_block}
 
-Output a JSON array of task descriptions. Empty array [] if no concrete tasks.
+Output a JSON array of objects. Empty array [] if no concrete tasks.
 
 EXAMPLES:
-Email about hackathon form deadline → ["Submit NYUAD Hackathon Speaker Form by Feb 27th 11:59 PM EST"]
-Email about project proposal review → ["Review and provide feedback on the research proposal by Monday"]
-Email about shelter-in-place → ["Follow shelter-in-place instructions — stay indoors until further notice"]
-Newsletter about new tools → []"""
+"Don't forget to prepare the presentation for Friday" → [{{"label": "Prepare presentation by Friday", "context": "Prepare the presentation for the team meeting on Friday as discussed"}}]
+Email about hackathon form deadline → [{{"label": "Submit hackathon form by Feb 27", "context": "Submit NYUAD Hackathon Speaker Form by Feb 27th 11:59 PM EST via the link in email"}}]
+Email with attached doc to review → [{{"label": "Review attached proposal", "context": "Review the project proposal document attached by Dr. Kim before next meeting"}}]
+Email about course registration opening → [{{"label": "Register for fall courses", "context": "Course registration opens March 1st — select and register for fall semester courses on the portal"}}]
+Email with no user action needed → []"""
 
     prompt = f"""From: {sender}
 Subject: {subject}
 Content: {body}
 
-Extract concrete actionable tasks with specific deadlines and details (JSON array only):"""
+Extract concrete actionable tasks the user must personally do. Include deadlines and specifics. (JSON array only):"""
 
     try:
         raw = (llm | parser).invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
@@ -221,136 +278,162 @@ Extract concrete actionable tasks with specific deadlines and details (JSON arra
         if isinstance(options, list):
             results = []
             for o in options:
-                task = str(o).strip()
-                if not task:
+                if isinstance(o, dict):
+                    label = str(o.get("label", "")).strip()
+                    context = str(o.get("context", "")).strip()
+                elif isinstance(o, str):
+                    label = o.strip()
+                    context = label
+                else:
                     continue
-                task_lower = task.lower()
-                # Strict dedup: word-overlap check against ALL existing todos
+                if not label:
+                    continue
+                task_lower = label.lower()
                 is_dup = any(_fuzzy_match(task_lower, existing) for existing in existing_todos)
                 if not is_dup:
-                    results.append(f"Todo: {task}")
+                    results.append({
+                        "type": "todo",
+                        "label": label,
+                        "context": context or label,
+                    })
             return {"todo_options": results[:3]}
     except Exception as e:
         logger.debug("Todo analysis error: %s", e)
     return {"todo_options": []}
 
 
-# ─── Node 3: Meeting analysis ──────────────────────────────────────────────
+# ─── Node 3: Merge and rank ─────────────────────────────────────────────────
 
-def meeting_analysis_node(state: QuickActionState) -> dict:
-    """Detect meetings, calls, or scheduling needs. Generous — better to suggest than miss.
-
-    Key improvements:
-    - More comprehensive signal detection
-    - Extracts specific meeting details (who, what, duration estimate)
-    - Also detects implicit scheduling needs ("let's discuss", "can we talk")
-    - Detects event invitations that should be added to calendar
-    """
-    email = state.get("email") or {}
-    subject = (email.get("subject") or "").lower()
-    body = (email.get("clean_body") or email.get("body") or email.get("snippet") or "")[:1200].lower()
-    full_text = f"{subject} {body}"
-
-    # Comprehensive meeting signal detection
-    meeting_signals = [
-        # Explicit meeting words
-        "meeting", "call", "zoom", "teams", "google meet", "conference",
-        "catch up", "catch-up", "sync", "1-on-1", "one-on-one", "standup",
-        # Scheduling intent
-        "schedule", "calendar", "availability", "available", "free time",
-        "appointment", "book a time", "book time", "set up a time",
-        # Social/casual meeting
-        "let's meet", "let's chat", "let's discuss", "let's talk",
-        "can we meet", "can we talk", "can we discuss", "can we chat",
-        "would like to meet", "want to meet", "want to discuss",
-        "get together", "drop by", "come by", "stop by",
-        # Formal scheduling
-        "workshop", "seminar", "webinar", "office hours", "consultation",
-        "interview", "demo", "presentation", "briefing", "orientation",
-        # Time references in scheduling context
-        "this week", "next week", "tomorrow", "this afternoon",
-        # Event registration with time
-        "rsvp", "register for", "sign up for",
-    ]
-
-    has_signal = any(sig in full_text for sig in meeting_signals)
-
-    # Also check for date/time patterns suggesting a specific event
-    time_patterns = re.findall(
-        r'\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)|'
-        r'\d{1,2}\s*(?:am|pm|AM|PM)|'
-        r'(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2}',
-        full_text,
-    )
-    has_event_time = len(time_patterns) >= 1
-
-    if not has_signal and not has_event_time:
-        return {"meeting_options": []}
-
-    # Use LLM for nuanced meeting detection
-    llm = get_llm(task="decide")
-    parser = StrOutputParser()
-
-    system = """You determine if an email contains a meeting, event, or scheduling need.
-
-RULES:
-1. If the email mentions a specific event, meeting, call, or appointment — suggest scheduling it.
-2. If the email implies a need to meet or discuss something — suggest scheduling.
-3. Include specific details: who to meet with, what the meeting is about, and when if mentioned.
-4. Do NOT suggest scheduling for: newsletters, system alerts, automated notifications, general announcements without RSVP.
-5. DO suggest scheduling for: invitations (even if time is set — user may want to add to calendar), requests to meet, events requiring attendance.
-
-Output a JSON array with at most 1 meeting description. Include the WHO, WHAT, and WHEN if available.
-Example: ["30 min meeting with Prof. Smith to discuss research proposal — suggested: this week"]
-Example: ["NYUAD Hackathon orientation on March 1st at 2pm — add to calendar"]
-Example: []"""
-
-    prompt = f"""From: {email.get('sender', '')}
-Subject: {email.get('subject', '')}
-Content: {(email.get('clean_body') or email.get('body') or '')[:800]}
-
-Does this require scheduling or adding an event to calendar? Be specific with details. (JSON array only):"""
-
-    try:
-        raw = (llm | parser).invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
-        text = _extract_json_array(raw)
-        options = json.loads(text)
-        if isinstance(options, list) and options:
-            desc = str(options[0]).strip()
-            if desc:
-                return {"meeting_options": [f"Schedule: {desc}"]}
-    except Exception as e:
-        logger.debug("Meeting analysis error: %s", e)
-    return {"meeting_options": []}
+# Words that indicate an action is a personal task, not a reply to send
+_TASK_INDICATORS = {
+    "prepare", "submit", "complete", "finish", "review", "write", "create",
+    "study", "read", "update", "fix", "build", "design", "implement",
+    "organize", "clean", "schedule", "plan", "draft", "edit", "research",
+    "book", "buy", "order", "register", "sign", "apply", "upload",
+    "download", "install", "setup", "configure", "attend",
+}
 
 
-# ─── Node 4: Merge and rank ─────────────────────────────────────────────────
+def _is_task_like(label: str) -> bool:
+    """Detect if a label is really a personal task, not a reply."""
+    words = set(re.findall(r"[a-z]+", label.lower()))
+    return bool(words & _TASK_INDICATORS)
+
 
 def merge_actions_node(state: QuickActionState) -> dict:
-    """Combine, deduplicate, and rank all suggested actions.
+    """Combine, deduplicate, validate, and rank all suggested actions.
 
-    No archive node — instead we set `no_action_message` when nothing is suggested.
-    Priority: Reply > Schedule > Todo. Capped at 5 total actions.
+    Validation steps:
+    1. Reclassify mistyped actions (task-like replies → todo, reply-like todos → reply)
+    2. Deduplicate by fuzzy label match
+    3. Meeting emails must have both accept and decline
+    4. Cap at 5 total
     """
-    final: list[str] = []
+    reply_opts = list(state.get("reply_options", []))
+    todo_opts = list(state.get("todo_options", []))
 
-    # Priority order: Reply > Schedule > Todo
-    for opt in state.get("reply_options", []):
-        if opt and opt not in final:
+    # ── Step 1: Reclassify mistyped actions ──────────────────────────
+    corrected_replies: list[dict] = []
+    for opt in reply_opts:
+        if not isinstance(opt, dict) or not opt.get("label"):
+            continue
+        label = opt["label"]
+        # If a "reply" is actually a task, move it to todos
+        if _is_task_like(label) and not opt.get("has_meeting"):
+            opt["type"] = "todo"
+            todo_opts.append(opt)
+        else:
+            corrected_replies.append(opt)
+
+    # ── Step 2: Deduplicate ──────────────────────────────────────────
+    final: list[dict] = []
+    seen_labels: set[str] = set()
+
+    # Replies first (includes meeting actions)
+    for opt in corrected_replies:
+        key = opt["label"].lower().strip()
+        if key not in seen_labels and not any(_fuzzy_match(key, s) for s in seen_labels):
+            seen_labels.add(key)
             final.append(opt)
 
-    for opt in state.get("meeting_options", []):
-        if opt and opt not in final:
+    # Then todos
+    for opt in todo_opts:
+        if not isinstance(opt, dict) or not opt.get("label"):
+            continue
+        key = opt["label"].lower().strip()
+        if key not in seen_labels and not any(_fuzzy_match(key, s) for s in seen_labels):
+            seen_labels.add(key)
+            opt["type"] = "todo"  # Ensure type is correct
             final.append(opt)
 
-    for opt in state.get("todo_options", []):
-        if opt and opt not in final:
-            final.append(opt)
+    # ── Step 2b: Keyword-based meeting safety net ──────────────────────
+    # If the LLM didn't flag has_meeting but labels clearly reference meetings/calendar,
+    # auto-correct them to be meeting actions.
+    _meeting_keywords = {"meeting", "calendar", "attend", "schedule", "rsvp", "invitation", "invite"}
+    for opt in final:
+        if opt.get("type") == "reply" and not opt.get("has_meeting"):
+            label_words = set(opt.get("label", "").lower().split())
+            if label_words & _meeting_keywords:
+                opt["has_meeting"] = True
+                # Try to infer meeting_action from label
+                lbl = opt["label"].lower()
+                if any(w in lbl for w in ("accept", "confirm", "add to calendar", "attend")):
+                    opt["meeting_action"] = "accept"
+                elif any(w in lbl for w in ("decline", "reject", "can't make")):
+                    opt["meeting_action"] = "decline"
+                elif any(w in lbl for w in ("reschedule", "different time", "postpone")):
+                    opt["meeting_action"] = "reschedule"
 
-    # Cap at 5 total actions
+    # ── Step 3: Meeting validation ───────────────────────────────────
+    # Any meeting-flagged action means we need the full trio: accept, decline, reschedule
+    has_any_meeting = any(o.get("has_meeting") for o in final)
+    has_accept = any(o.get("meeting_action") == "accept" for o in final)
+    has_decline = any(o.get("meeting_action") == "decline" for o in final)
+    has_reschedule = any(o.get("meeting_action") == "reschedule" for o in final)
+
+    if has_any_meeting:
+        # Find a reference meeting action for context cloning
+        _ref = next((o for o in final if o.get("has_meeting")), None)
+        _ref_ctx = _ref.get("context", "") if _ref else ""
+
+        if not has_accept:
+            accept = {
+                "type": "reply",
+                "label": "Accept meeting",
+                "context": _ref_ctx.replace("Decline", "Accept").replace("decline", "accept").replace("Reschedule", "Accept").replace("reschedule", "accept"),
+                "has_meeting": True,
+                "meeting_action": "accept",
+            }
+            # Insert at position 0 (accept should be first)
+            final.insert(0, accept)
+
+        if not has_decline:
+            # Insert after accept
+            _accept_idx = next((i for i, o in enumerate(final) if o.get("meeting_action") == "accept"), 0)
+            decline = {
+                "type": "reply",
+                "label": "Decline meeting",
+                "context": _ref_ctx.replace("Accept", "Decline").replace("accept", "decline").replace("Reschedule", "Decline").replace("reschedule", "decline"),
+                "has_meeting": True,
+                "meeting_action": "decline",
+            }
+            final.insert(_accept_idx + 1, decline)
+
+        if not has_reschedule:
+            # Insert after decline
+            _decline_idx = next((i for i, o in enumerate(final) if o.get("meeting_action") == "decline"), 1)
+            reschedule = {
+                "type": "reply",
+                "label": "Suggest different time",
+                "context": _ref_ctx.replace("Accept", "Reschedule").replace("accept", "reschedule").replace("Decline", "Reschedule").replace("decline", "reschedule"),
+                "has_meeting": True,
+                "meeting_action": "reschedule",
+            }
+            final.insert(_decline_idx + 1, reschedule)
+
+    # ── Step 4: Cap at 5 ─────────────────────────────────────────────
     final = final[:5]
 
-    # If nothing was suggested, set a friendly no-action message
     no_action = ""
     if not final:
         no_action = "No action needed"
@@ -389,21 +472,25 @@ def _fuzzy_match(a: str, b: str) -> bool:
 # ─── Graph construction ────────────────────────────────────────────────────
 
 def _build_quick_actions_graph():
-    """Build the quick-actions analysis graph (no archive node)."""
+    """Build the quick-actions analysis graph.
+
+    3 nodes: gather_context → reply_analysis (includes meeting) → todo_analysis → merge_actions.
+    """
     graph = StateGraph(QuickActionState)
 
     graph.add_node("gather_context", gather_context_node)
     graph.add_node("reply_analysis", reply_analysis_node)
     graph.add_node("todo_analysis", todo_analysis_node)
-    graph.add_node("meeting_analysis", meeting_analysis_node)
     graph.add_node("merge_actions", merge_actions_node)
 
     graph.set_entry_point("gather_context")
+    # Parallel fan-out: gather_context fires both reply_analysis and
+    # todo_analysis simultaneously; merge_actions is the fan-in barrier.
     graph.add_edge("gather_context", "reply_analysis")
-    graph.add_edge("reply_analysis", "todo_analysis")
-    graph.add_edge("todo_analysis", "meeting_analysis")
-    graph.add_edge("meeting_analysis", "merge_actions")
-    graph.add_edge("merge_actions", END)
+    graph.add_edge("gather_context", "todo_analysis")
+    graph.add_edge("reply_analysis", "merge_actions")
+    graph.add_edge("todo_analysis",  "merge_actions")
+    graph.add_edge("merge_actions",  END)
 
     return graph.compile()
 
@@ -411,11 +498,12 @@ def _build_quick_actions_graph():
 _QUICK_ACTIONS_GRAPH = _build_quick_actions_graph()
 
 
-def suggest_quick_actions(email: dict) -> list[str]:
+def suggest_quick_actions(email: dict) -> list[dict]:
     """Run the quick-actions graph for a single email.
 
-    Returns a list of action strings like:
-      ["Reply: Accept the invitation", "Todo: Submit form by Friday", "Schedule: meeting with Alice"]
+    Returns a list of action dicts like:
+      [{"type": "reply", "label": "Agree to meeting", "context": "...", "has_meeting": True, "meeting_action": "accept"},
+       {"type": "todo", "label": "Submit form by Friday", "context": "..."}]
     """
     try:
         result = _QUICK_ACTIONS_GRAPH.invoke(

@@ -40,6 +40,7 @@ def propose_meeting_times(
             "duration_minutes": duration_minutes or 30,
             "attendees": [sender] if sender else [],
             "notes": "",
+            "specific_time": "",
         }
     else:
         # LLM extracted intent — still prefer title_hint if provided (more specific)
@@ -52,6 +53,25 @@ def propose_meeting_times(
     if sender_email and sender_email.lower() not in [a.lower() for a in attendees]:
         attendees = [sender_email] + attendees
     intent["attendees"] = attendees
+
+    # ── If the email specifies a concrete time, return it directly ──
+    specific_time = intent.get("specific_time", "")
+    if specific_time:
+        try:
+            start_dt = datetime.fromisoformat(specific_time.replace("Z", "+00:00"))
+            if start_dt.tzinfo is None:
+                tz = get_user_timezone()
+                start_dt = start_dt.replace(tzinfo=tz)
+            dur = duration_minutes or intent.get("duration_minutes", 30)
+            end_dt = start_dt + timedelta(minutes=dur)
+            return {
+                "meeting_intent": intent,
+                "free_slots": [(start_dt.isoformat(), end_dt.isoformat())],
+                "specific_time_from_email": True,
+                "error": None,
+            }
+        except Exception:
+            pass  # Fall through to normal slot finding
 
     duration = duration_minutes or intent.get("duration_minutes", 30)
     tz = get_user_timezone()

@@ -19,7 +19,7 @@ def safe_key(email_id: str) -> str:
 from config import CREDENTIALS_FILE, TOKEN_FILE
 from tools.google_auth import get_google_credentials
 from tools.gmail_tools import send_email, extract_email_address, archive_email
-from agent.langgraph_pipeline import run_email_pipeline, load_from_memory
+from agent.langgraph_pipeline import run_email_pipeline, load_from_memory, INITIAL_FETCH_COUNT, FETCH_NEW_COUNT
 from agent.memory_store import mark_email_archived
 from agent.email_memory import (
     get_email_count,
@@ -33,6 +33,7 @@ from agent.email_memory import (
 )
 from agent.decision_suggester import suggest_decision
 from agent.drafter import draft_reply
+from agent.drafting_graph import run_drafting_graph
 from agent.style_learner import load_persisted_style
 from agent.profile import load_profile, get_current_user_email
 from agent.scheduling import propose_meeting_times, create_event_from_slot
@@ -226,39 +227,48 @@ st.markdown(
     }}
 
     /* Quick-action button groups — keyed containers */
+    /* Reply buttons: ORANGE */
     div[class*="qa-reply-"] .stButton>button {{
-        background: #0ea5e9;
+        background: #f97316 !important;
+        color: #fff !important;
+        border: none !important;
+        font-weight: 500 !important;
     }}
     div[class*="qa-reply-"] .stButton>button:hover {{
-        background: #0284c7;
-        box-shadow: 0 2px 8px rgba(14,165,233,0.35);
+        background: #ea580c !important;
+        color: #fff !important;
+        box-shadow: 0 2px 8px rgba(249,115,22,0.35);
     }}
+    /* Todo buttons: PURPLE */
     div[class*="qa-todo-"] .stButton>button {{
-        background: #f59e0b;
-        color: #1e1b0f;
+        background: #8b5cf6 !important;
+        color: #fff !important;
+        border: none !important;
+        font-weight: 500 !important;
     }}
     div[class*="qa-todo-"] .stButton>button:hover {{
-        background: #d97706;
-        box-shadow: 0 2px 8px rgba(245,158,11,0.35);
-    }}
-    div[class*="qa-sched-"] .stButton>button {{
-        background: #8b5cf6;
-    }}
-    div[class*="qa-sched-"] .stButton>button:hover {{
-        background: #7c3aed;
+        background: #7c3aed !important;
+        color: #fff !important;
         box-shadow: 0 2px 8px rgba(139,92,246,0.35);
     }}
+    /* Custom / Archive buttons: GRAY (engraved) */
+    div[class*="qa-custom-"] .stButton>button,
     div[class*="qa-archive-"] .stButton>button {{
-        background: #475569;
+        background: #475569 !important;
+        color: #e2e8f0 !important;
+        border: 1px solid rgba(148,163,184,0.3) !important;
+        font-weight: 500 !important;
     }}
+    div[class*="qa-custom-"] .stButton>button:hover,
     div[class*="qa-archive-"] .stButton>button:hover {{
-        background: #64748b;
+        background: #64748b !important;
+        color: #fff !important;
         box-shadow: 0 2px 8px rgba(100,116,139,0.35);
     }}
     /* Remove extra padding/gap inside keyed QA containers */
     div[class*="qa-reply-"],
     div[class*="qa-todo-"],
-    div[class*="qa-sched-"],
+    div[class*="qa-custom-"],
     div[class*="qa-archive-"] {{
         gap: 0 !important;
     }}
@@ -320,30 +330,17 @@ st.markdown(
         font-weight: 500;
     }}
 
-    /* Style the open-email buttons to be invisible overlays */
-    /* Target stVerticalBlock containers that have an email-card inside */
+    /* Hide open-email buttons — JS event delegation handles clicks */
     [data-testid="stVerticalBlock"]:has(.email-card) {{
         position: relative !important;
     }}
     [data-testid="stVerticalBlock"]:has(.email-card) > [data-testid="stElementContainer"]:has(button) {{
-        position: absolute !important;
-        top: 0 !important;
-        left: 0 !important;
-        right: 0 !important;
-        bottom: 0 !important;
-        z-index: 10 !important;
-    }}
-    [data-testid="stVerticalBlock"]:has(.email-card) > [data-testid="stElementContainer"]:has(button) button {{
-        width: 100% !important;
-        height: 100% !important;
-        opacity: 0 !important;
-        cursor: pointer !important;
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        padding: 0 !important;
-        margin: 0 !important;
+        height: 0 !important;
         min-height: 0 !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: none !important;
     }}
 
     /* Section headers */
@@ -418,6 +415,26 @@ st.markdown(
     ::-moz-selection {{
         background: transparent !important;
     }}
+
+    /* Compact multiselect for category filter —
+       one line of chips, overflow hidden with "..." indicator */
+    .stMultiSelect [data-baseweb="tag"] {{
+        max-width: 120px;
+    }}
+    .stMultiSelect [data-baseweb="tag"] span {{
+        max-width: 80px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }}
+    .stMultiSelect > div {{
+        max-height: 38px;
+        overflow: hidden;
+    }}
+    /* Dropdown checkmarks already shown by Streamlit for selected items */
+    .stMultiSelect [data-baseweb="menu"] [role="option"][aria-selected="true"] {{
+        background-color: rgba(56, 189, 248, 0.18) !important;
+    }}
 </style>
 """,
     unsafe_allow_html=True,
@@ -437,8 +454,7 @@ if not CREDENTIALS_FILE.exists():
 # Defaults for model (used before widgets initialize)
 llm_options = ["Groq (hosted)", "Qwen 2.5 3B (local)", "Qwen 2.5 7B (local)"]
 default_llm_display = st.session_state.get("llm_backend", "Qwen 2.5 3B (local)")
-MIN_FETCH = 20  # minimum emails to fetch on first load
-MAX_FETCH = 20  # fetch more when catching up on new emails
+# MIN_FETCH / MAX_FETCH replaced by INITIAL_FETCH_COUNT and FETCH_NEW_COUNT from the pipeline.
 
 # Main header row: logo | model | fetch | sign-out
 header = st.container()
@@ -539,8 +555,49 @@ if retrain_clicked:
 if "emails" not in st.session_state and "_memory_loaded" not in st.session_state:
     st.session_state["_memory_loaded"] = True
     try:
-        cached = load_from_memory()
+        cached = load_from_memory()   # loads ALL stored emails (no limit)
         if cached:
+            # Backfill: regenerate quick actions for emails that are missing them.
+            # decision_options is None when never processed, or missing from DB.
+            # An explicit empty list [] means "processed but no actions" — skip those.
+            _needs_backfill = [
+                _ce for _ce in cached
+                if _ce.get("decision_options") is None
+            ]
+            if _needs_backfill:
+                from agent.quick_actions_graph import suggest_quick_actions_full as _backfill_qa
+                from agent.email_memory import store_processed_emails as _backfill_store
+                for _ce in _needs_backfill:
+                    try:
+                        _bf_result = _backfill_qa(_ce)
+                        _bf_opts = _bf_result.get("final_options", [])
+                        _ce["decision_options"] = _bf_opts  # Always set, even if empty
+                        _bf_na = _bf_result.get("no_action_message", "")
+                        if _bf_na:
+                            _ce["no_action_message"] = _bf_na
+                    except Exception:
+                        _ce["decision_options"] = []  # Mark as processed to avoid re-trying
+                # Persist backfilled options to DB
+                try:
+                    _backfill_store(_needs_backfill)
+                except Exception:
+                    pass
+
+            # Tag cached emails as action-required where appropriate
+            for _ce in cached:
+                _ce_cat = (_ce.get("category") or "informational").lower()
+                _ce_tags = [t.strip() for t in _ce_cat.split(",") if t.strip()]
+                _ce_main = _ce_tags[0] if _ce_tags else "informational"
+                if _ce_main == "important":
+                    _ce_opts = _ce.get("decision_options") or []
+                    _has_reply = any(
+                        (isinstance(o, dict) and o.get("type") == "reply") or
+                        (isinstance(o, str) and o.lower().startswith("reply"))
+                        for o in _ce_opts
+                    ) if _ce_opts else False
+                    if _has_reply:
+                        _ce_extras = _ce_tags[1:]
+                        _ce["category"] = ",".join(["action-required"] + _ce_extras) if _ce_extras else "action-required"
             st.session_state["emails"] = cached
             # Pre-compute category suggestions on first load
             try:
@@ -551,6 +608,11 @@ if "emails" not in st.session_state and "_memory_loaded" not in st.session_state
                 st.session_state["_cat_proposals_stale"] = False
             except Exception:
                 pass
+        else:
+            # ── Empty DB: run new-user init (same as retrain) ──────────
+            # Defer to the analysis block by flagging is_analyzing
+            st.session_state["is_analyzing"] = True
+            st.session_state["_retrain"] = True
     except Exception:
         pass
 
@@ -582,12 +644,12 @@ os.environ["LLM_PROVIDER"] = llm_provider_map.get(current_llm_display, "qwen_loc
 if st.session_state.get("is_analyzing", False):
     actual_query = "in:inbox"
     retrain_mode = st.session_state.pop("_retrain", False)
-    status_label = "Retraining..." if retrain_mode else "Analyzing inbox..."
+    # Retrain / new-user init fetches 15; normal fetch grabs 20 to catch new ones
+    fetch_count = INITIAL_FETCH_COUNT if retrain_mode else FETCH_NEW_COUNT
+    status_label = "Initialising inbox..." if retrain_mode else "Fetching new emails..."
+
     with st.status(status_label, expanded=True) as status:
         try:
-            stored_count = get_email_count()
-            fetch_count = MAX_FETCH if stored_count >= MIN_FETCH else MIN_FETCH
-
             status.update(label="Fetching emails...")
             state = run_email_pipeline(
                 query=actual_query,
@@ -637,10 +699,25 @@ emails = st.session_state["emails"]
 
 filtered = emails
 
-# Apply category filter if active
-_active_cat_filter = st.session_state.get("_cat_filter")
-if _active_cat_filter:
-    filtered = [e for e in filtered if _active_cat_filter in [t.strip() for t in (e.get("category", "informational") or "informational").split(",")]]
+# Apply category filter — hide unchecked categories
+# Read directly from the multiselect widget key (_cat_multifilter) which Streamlit
+# updates BEFORE the script re-runs. This avoids the 1-rerun delay that happened
+# when reading from the derived _hidden_cats which was only set further down.
+_cat_filter_sel = st.session_state.get("_cat_multifilter")
+if _cat_filter_sel is not None:
+    _all_filter_slugs = {lb["slug"] for lb in get_all_labels()}
+    _hidden_cats = _all_filter_slugs - set(_cat_filter_sel)
+    st.session_state["_hidden_cats"] = _hidden_cats
+else:
+    _hidden_cats = st.session_state.get("_hidden_cats", set())
+if _hidden_cats:
+    def _email_visible(e):
+        cat_raw = (e.get("category", "informational") or "informational").strip()
+        tags = [t.strip() for t in cat_raw.split(",") if t.strip()]
+        main_cat = tags[0] if tags else "informational"
+        # Hide if main category is in the hidden set
+        return main_cat not in _hidden_cats
+    filtered = [e for e in filtered if _email_visible(e)]
 
 # Always sort by newest first
 filtered.sort(key=lambda x: x.get("internal_date", 0), reverse=True)
@@ -700,7 +777,7 @@ with draft_col:
         else:
             for lb in all_labels:
                 slug = lb["slug"]
-                c_left, c_mid, c_right = st.columns([3, 1, 1])
+                c_left, c_mid = st.columns([4, 1])
                 with c_left:
                     color_dot = f"<span style='display:inline-block;width:10px;height:10px;border-radius:50%;background:{lb['color']};margin-right:6px;vertical-align:middle;'></span>"
                     st.markdown(
@@ -711,16 +788,12 @@ with draft_col:
                     if slug not in SYSTEM_CATEGORIES:
                         if st.button("Delete", key=f"del_cat_{slug}"):
                             delete_label(slug)
+                            # Also strip the tag from in-memory session emails
+                            for _se in st.session_state.get("emails", []):
+                                _se_cat = (_se.get("category", "informational") or "informational").strip()
+                                _se_tags = [t.strip() for t in _se_cat.split(",") if t.strip() and t.strip() != slug]
+                                _se["category"] = ",".join(_se_tags) if _se_tags else "informational"
                             st.rerun()
-                with c_right:
-                    _filter_active = st.session_state.get("_cat_filter") == slug
-                    _filter_label = "Unfilter" if _filter_active else "Filter"
-                    if st.button(_filter_label, key=f"filter_cat_{slug}"):
-                        if _filter_active:
-                            st.session_state.pop("_cat_filter", None)
-                        else:
-                            st.session_state["_cat_filter"] = slug
-                        st.rerun()
 
         # ── Re-categorize selected email ──
         st.markdown("---")
@@ -797,85 +870,75 @@ with draft_col:
             st.session_state["_cat_proposals_stale"] = False
 
         if st.session_state.get("_cat_proposals"):
-            st.markdown("**Suggested Categories**")
+            st.markdown(
+                "<div style='display:flex;align-items:center;gap:8px;margin-bottom:8px;'>"
+                "<span style='font-size:13px;font-weight:600;color:#94a3b8;'>Suggested categories</span>"
+                "<span style='font-size:11px;color:#64748b;'>click to create</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            # Render proposals as clickable pill buttons (no decorative HTML)
+            _proposals = st.session_state["_cat_proposals"]
+            # CSS for pill-shaped buttons
             st.markdown(
                 "<style>"
-                ".suggest-cat-wrap .stButton>button {"
-                "  background: transparent !important;"
-                "  border: 1px solid #475569 !important;"
-                "  color: #cbd5e1 !important;"
-                "  font-weight: 400 !important;"
-                "  font-size: 13px !important;"
-                "  padding: 4px 12px !important;"
-                "  width: auto !important;"
-                "  min-width: 0 !important;"
-                "}"
-                ".suggest-cat-wrap .stButton>button:hover {"
-                "  background: #1e293b !important;"
-                "  border-color: #64748b !important;"
-                "  color: #f1f5f9 !important;"
-                "  box-shadow: none !important;"
-                "}"
+                ".cat-pill button {border-radius:16px !important; padding:2px 14px !important; font-size:12px !important; "
+                "background:#1e293b !important; border:1px solid #334155 !important; color:#e2e8f0 !important;}"
+                ".cat-pill button:hover {background:#334155 !important; border-color:#475569 !important;}"
                 "</style>",
                 unsafe_allow_html=True,
             )
-            _sug_container = st.container(key="suggest-cat-wrap")
-            with _sug_container:
-                _proposals = st.session_state["_cat_proposals"]
-                # Render in rows of up to 5 columns
-                _row_size = 5
-                for _row_start in range(0, len(_proposals), _row_size):
-                    _row_items = _proposals[_row_start:_row_start + _row_size]
-                    _cols = st.columns(len(_row_items))
-                    for _ci, prop in enumerate(_row_items):
-                        pi = _row_start + _ci
-                        with _cols[_ci]:
-                            if st.button(prop["proposed_name"], key=f"accept_prop_{pi}"):
-                                try:
-                                    from agent.email_memory import get_label_by_slug, _slugify, upsert_rule
-                                    _prop_slug = _slugify(prop["proposed_name"])
-                                    existing = get_label_by_slug(_prop_slug)
-                                    if existing:
-                                        new_lb = existing
-                                    else:
-                                        _rand_color = random.choice(_NICE_COLORS)
-                                        new_lb = create_label(prop["proposed_name"], color=_rand_color)
-                                    upsert_rule(prop["match_type"], prop["match_value"], new_lb["slug"])
-                                    # Apply to existing emails retroactively
-                                    _n_updated = apply_rule_to_existing_emails(prop["match_type"], prop["match_value"], new_lb["slug"])
-                                    # Update session emails in-memory too
-                                    _match_val = prop["match_value"].lower()
-                                    _match_type = prop["match_type"]
-                                    for _se in st.session_state.get("emails", []):
-                                        _se_cat = (_se.get("category", "informational") or "informational").strip()
-                                        _se_tags = [t.strip() for t in _se_cat.split(",")]
-                                        if new_lb["slug"] in _se_tags:
-                                            continue
-                                        _se_matched = False
-                                        if _match_type == "subject_keyword":
-                                            _se_matched = _match_val in (_se.get("subject") or "").lower()
-                                        elif _match_type == "sender":
-                                            _se_s = (_se.get("sender") or "").lower()
-                                            _se_addr = _se_s.split("<")[1].split(">")[0].strip() if "<" in _se_s and ">" in _se_s else (_se_s.strip() if "@" in _se_s else "")
-                                            _se_matched = _se_addr == _match_val
-                                        elif _match_type == "sender_domain":
-                                            _se_s = (_se.get("sender") or "").lower()
-                                            _se_addr = _se_s.split("<")[1].split(">")[0].strip() if "<" in _se_s and ">" in _se_s else (_se_s.strip() if "@" in _se_s else "")
-                                            if _se_addr and "@" in _se_addr:
-                                                _se_matched = _se_addr.split("@", 1)[1] == _match_val
-                                        if _se_matched:
-                                            _se_main = _se_tags[0] if _se_tags else "informational"
-                                            _se_extras = _se_tags[1:]
-                                            _se["category"] = ",".join([_se_main] + _se_extras + [new_lb["slug"]])
-                                    _msg = f"Created '{prop['proposed_name']}'"
-                                    if _n_updated:
-                                        _msg += f" and applied to {_n_updated} existing email{'s' if _n_updated != 1 else ''}"
-                                    st.success(_msg + ".")
-                                    st.session_state["_cat_proposals"].pop(pi)
-                                    st.session_state["_cat_proposals_stale"] = True
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(str(e))
+            _pill_cols = st.columns(min(len(_proposals), 4))
+            for pi, prop in enumerate(_proposals):
+                with _pill_cols[pi % min(len(_proposals), 4)]:
+                    st.markdown("<div class='cat-pill'>", unsafe_allow_html=True)
+                    if st.button(prop['proposed_name'], key=f"accept_prop_{pi}", use_container_width=True):
+                        try:
+                            from agent.email_memory import get_label_by_slug, _slugify, upsert_rule
+                            _prop_slug = _slugify(prop["proposed_name"])
+                            existing = get_label_by_slug(_prop_slug)
+                            if existing:
+                                new_lb = existing
+                            else:
+                                _rand_color = random.choice(_NICE_COLORS)
+                                new_lb = create_label(prop["proposed_name"], color=_rand_color)
+                            upsert_rule(prop["match_type"], prop["match_value"], new_lb["slug"])
+                            # Apply to existing emails retroactively
+                            _n_updated = apply_rule_to_existing_emails(prop["match_type"], prop["match_value"], new_lb["slug"])
+                            # Update session emails in-memory too
+                            _match_val = prop["match_value"].lower()
+                            _match_type = prop["match_type"]
+                            for _se in st.session_state.get("emails", []):
+                                _se_cat = (_se.get("category", "informational") or "informational").strip()
+                                _se_tags = [t.strip() for t in _se_cat.split(",")]
+                                if new_lb["slug"] in _se_tags:
+                                    continue
+                                _se_matched = False
+                                if _match_type == "subject_keyword":
+                                    _se_matched = _match_val in (_se.get("subject") or "").lower()
+                                elif _match_type == "sender":
+                                    _se_s = (_se.get("sender") or "").lower()
+                                    _se_addr = _se_s.split("<")[1].split(">")[0].strip() if "<" in _se_s and ">" in _se_s else (_se_s.strip() if "@" in _se_s else "")
+                                    _se_matched = _se_addr == _match_val
+                                elif _match_type == "sender_domain":
+                                    _se_s = (_se.get("sender") or "").lower()
+                                    _se_addr = _se_s.split("<")[1].split(">")[0].strip() if "<" in _se_s and ">" in _se_s else (_se_s.strip() if "@" in _se_s else "")
+                                    if _se_addr and "@" in _se_addr:
+                                        _se_matched = _se_addr.split("@", 1)[1] == _match_val
+                                if _se_matched:
+                                    _se_main = _se_tags[0] if _se_tags else "informational"
+                                    _se_extras = _se_tags[1:]
+                                    _se["category"] = ",".join([_se_main] + _se_extras + [new_lb["slug"]])
+                            _msg = f"Created '{prop['proposed_name']}'"
+                            if _n_updated:
+                                _msg += f" and applied to {_n_updated} existing email{'s' if _n_updated != 1 else ''}"
+                            st.success(_msg + ".")
+                            st.session_state["_cat_proposals"].pop(pi)
+                            st.session_state["_cat_proposals_stale"] = True
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                    st.markdown("</div>", unsafe_allow_html=True)
 
     elif active_tab == "Todo":
         # ── Todo List Panel ──────────────────────────────────────────
@@ -957,69 +1020,171 @@ with draft_col:
                     components.html(wrapped, height=_body_height, scrolling=True)
 
             # ── Quick Actions ────────────────────────────────────────
+            # Color-coded action buttons: orange=reply, purple=todo, grey=custom
             options_key = f"reply_options_{eid}"
             options = st.session_state.get(options_key)
             if options is None:
                 pre = email.get("decision_options")
                 if pre and isinstance(pre, list) and len(pre) > 0:
-                    options = pre
+                    # Normalize: handle both new dict format and legacy string format
+                    normalized = []
+                    for item in pre:
+                        if isinstance(item, dict) and item.get("label"):
+                            normalized.append(item)
+                        elif isinstance(item, str):
+                            # Legacy format: "Reply: ...", "Todo: ...", "Schedule: ..."
+                            s = item.strip()
+                            if s.startswith("Reply:"):
+                                normalized.append({"type": "reply", "label": s[6:].strip(), "context": s[6:].strip(), "has_meeting": False, "meeting_action": None})
+                            elif s.startswith("Todo:"):
+                                normalized.append({"type": "todo", "label": s[5:].strip(), "context": s[5:].strip()})
+                            elif s.startswith("Schedule:"):
+                                normalized.append({"type": "reply", "label": s[9:].strip(), "context": s[9:].strip(), "has_meeting": True, "meeting_action": "accept"})
+                            elif s:
+                                normalized.append({"type": "reply", "label": s, "context": s, "has_meeting": False, "meeting_action": None})
+                    options = normalized
                 else:
                     options = []
                 st.session_state[options_key] = options
 
             if options:
-                # Sort: Reply first, Schedule second, Todo last
+                # Sort: reply actions first, then todo
                 def _qa_sort_key(o):
-                    if o.startswith("Reply:"):
-                        return (0, o)
-                    elif o.startswith("Schedule:"):
-                        return (1, o)
-                    elif o.startswith("Todo:"):
-                        return (2, o)
-                    return (3, o)
+                    t = o.get("type", "reply") if isinstance(o, dict) else "reply"
+                    return (0 if t == "reply" else 1, o.get("label", "") if isinstance(o, dict) else str(o))
                 options = sorted(options, key=_qa_sort_key)
 
                 st.markdown("**Quick actions**")
                 for j, opt in enumerate(options):
-                    if opt.startswith("Reply:"):
-                        with st.container(key=f"qa-reply-{eid}-{j}"):
-                            if st.button(opt, key=f"qa_{eid}_{j}", use_container_width=True):
-                                reply_desc = opt[len("Reply:"):].strip()
-                                st.session_state[f"_last_decision_{eid}"] = reply_desc
-                                if f"reply_generated_{eid}" in st.session_state:
-                                    del st.session_state[f"reply_generated_{eid}"]
-                                with st.spinner("Drafting reply..."):
-                                    try:
-                                        current_style = st.session_state.get("learned_style") or load_persisted_style()
-                                        draft_text = draft_reply(email, decision=reply_desc, style_notes=current_style)
-                                        if draft_text:
-                                            st.session_state[f"reply_generated_{eid}"] = draft_text
-                                            st.success("Draft generated.")
-                                        else:
-                                            st.error("Failed to generate draft.")
-                                    except Exception as e:
-                                        st.error(f"Error drafting reply: {str(e)}")
+                    if not isinstance(opt, dict):
+                        continue
+                    action_type = opt.get("type", "reply")
+                    label = opt.get("label", "")
+                    context = opt.get("context", label)
+                    has_meeting = opt.get("has_meeting", False)
+                    meeting_action = opt.get("meeting_action")
+
+                    if action_type == "reply":
+                        css_class = "qa-reply-btn"
+                        with st.container(key=f"qa-{css_class}-{eid}-{j}"):
+                            st.markdown(f"<div class='{css_class}'>", unsafe_allow_html=True)
+                            if st.button(label, key=f"qa_{eid}_{j}", use_container_width=True):
+                                # ── Meeting-aware action handling ──
+                                if has_meeting and meeting_action == "accept":
+                                    # Accept meeting: extract intent, auto-create if specific time known
+                                    st.session_state[f"_last_decision_{eid}"] = f"Accept: {context}"
+                                    if f"reply_generated_{eid}" in st.session_state:
+                                        del st.session_state[f"reply_generated_{eid}"]
+                                    with st.spinner("Scheduling meeting & drafting confirmation..."):
+                                        try:
+                                            sched_result = propose_meeting_times(email, days_ahead=7, max_slots=5, force=True, title_hint=context)
+                                            slots = sched_result.get("free_slots", [])
+                                            intent = sched_result.get("meeting_intent", {})
+                                            has_specific_time = sched_result.get("specific_time_from_email", False)
+
+                                            if has_specific_time and slots:
+                                                # Email had a concrete time — auto-create, no picker
+                                                from tools.zoom_tools import zoom_available
+                                                s_start, s_end = slots[0]
+                                                evt = create_event_from_slot(
+                                                    meeting_intent=intent,
+                                                    start_iso=s_start,
+                                                    end_iso=s_end,
+                                                    add_zoom=zoom_available(),
+                                                )
+                                                from datetime import datetime as _dt
+                                                try:
+                                                    dt = _dt.fromisoformat(s_start.replace("Z", "+00:00"))
+                                                    slot_label = dt.strftime("%a %b %d, %I:%M %p")
+                                                except Exception:
+                                                    slot_label = s_start
+                                                meeting_summary = evt.get('summary', 'Meeting')
+                                                add_todo_item(task=f"Meeting: {meeting_summary} on {slot_label}", email_id=email.get("id", ""))
+                                                st.success(f"Event auto-created: {meeting_summary} — {slot_label}")
+                                                # Draft confirmation
+                                                try:
+                                                    current_style = st.session_state.get("learned_style") or load_persisted_style()
+                                                    draft_text = run_drafting_graph(email, decision=f"Accept the meeting/event. {context}. Confirmed for {slot_label}.", style_notes=current_style)
+                                                    if draft_text:
+                                                        st.session_state[f"reply_generated_{eid}"] = draft_text
+                                                except Exception:
+                                                    pass
+                                            elif slots:
+                                                # No specific time — show time picker panel
+                                                st.session_state[f"schedule_pending_{eid}"] = True
+                                                st.session_state[f"schedule_desc_{eid}"] = context
+                                                st.session_state[f"schedule_mode_{eid}"] = "accept"
+                                                st.session_state[f"schedule_result_{eid}"] = sched_result
+                                            else:
+                                                st.warning("No available time slots found.")
+                                        except Exception as e:
+                                            st.warning(f"Could not auto-schedule: {e}")
+                                        # Only draft if no schedule_pending AND no draft already generated
+                                        # (auto-create path already drafts its own confirmation above)
+                                        if not st.session_state.get(f"schedule_pending_{eid}") and f"reply_generated_{eid}" not in st.session_state:
+                                            try:
+                                                current_style = st.session_state.get("learned_style") or load_persisted_style()
+                                                draft_text = run_drafting_graph(email, decision=f"Accept the meeting/event. {context}", style_notes=current_style)
+                                                if draft_text:
+                                                    st.session_state[f"reply_generated_{eid}"] = draft_text
+                                            except Exception:
+                                                pass
+                                    st.rerun()
+                                elif has_meeting and meeting_action == "decline":
+                                    # Decline meeting: draft polite decline
+                                    st.session_state[f"_last_decision_{eid}"] = f"Decline: {context}"
+                                    if f"reply_generated_{eid}" in st.session_state:
+                                        del st.session_state[f"reply_generated_{eid}"]
+                                    with st.spinner("Drafting decline..."):
+                                        try:
+                                            current_style = st.session_state.get("learned_style") or load_persisted_style()
+                                            draft_text = run_drafting_graph(email, decision=f"Politely decline. {context}", style_notes=current_style)
+                                            if draft_text:
+                                                st.session_state[f"reply_generated_{eid}"] = draft_text
+                                        except Exception as e:
+                                            st.error(f"Error: {e}")
+                                    st.rerun()
+                                elif has_meeting and meeting_action == "reschedule":
+                                    # Reschedule: show time slots first
+                                    st.session_state[f"schedule_pending_{eid}"] = True
+                                    st.session_state[f"schedule_desc_{eid}"] = context
+                                    st.session_state[f"schedule_mode_{eid}"] = "reschedule"
+                                    st.rerun()
+                                else:
+                                    # Normal reply: draft reply
+                                    st.session_state[f"_last_decision_{eid}"] = context
+                                    if f"reply_generated_{eid}" in st.session_state:
+                                        del st.session_state[f"reply_generated_{eid}"]
+                                    with st.spinner("Drafting reply..."):
+                                        try:
+                                            current_style = st.session_state.get("learned_style") or load_persisted_style()
+                                            draft_text = run_drafting_graph(email, decision=context, style_notes=current_style)
+                                            if draft_text:
+                                                st.session_state[f"reply_generated_{eid}"] = draft_text
+                                                st.success("Draft generated.")
+                                            else:
+                                                st.error("Failed to generate draft.")
+                                        except Exception as e:
+                                            st.error(f"Error drafting reply: {str(e)}")
+                                    st.rerun()
+                            st.markdown("</div>", unsafe_allow_html=True)
+
+                    elif action_type == "todo":
+                        css_class = "qa-todo-btn"
+                        with st.container(key=f"qa-{css_class}-{eid}-{j}"):
+                            st.markdown(f"<div class='{css_class}'>", unsafe_allow_html=True)
+                            if st.button(label, key=f"qa_{eid}_{j}", use_container_width=True):
+                                add_todo_item(task=context or label, email_id=email.get("id", ""))
+                                st.success("Added to todo list.")
                                 st.rerun()
-                    elif opt.startswith("Todo:"):
-                        with st.container(key=f"qa-todo-{eid}-{j}"):
-                            if st.button(opt, key=f"qa_{eid}_{j}", use_container_width=True):
-                                task_text = opt[len("Todo:"):].strip()
-                                add_todo_item(task=task_text, email_id=email.get("id", ""))
-                                st.success(f"Added to todo list.")
-                                st.rerun()
-                    elif opt.startswith("Schedule:"):
-                        with st.container(key=f"qa-sched-{eid}-{j}"):
-                            if st.button(opt, key=f"qa_{eid}_{j}", use_container_width=True):
-                                st.session_state[f"schedule_pending_{eid}"] = True
-                                st.session_state[f"schedule_desc_{eid}"] = opt[len("Schedule:"):].strip()
-                                st.rerun()
+                            st.markdown("</div>", unsafe_allow_html=True)
             else:
                 # No quick actions — show muted message if available
                 no_action_msg = email.get("no_action_message", "")
                 if no_action_msg:
                     st.markdown(f'<p style="color:#999;font-style:italic;">{no_action_msg}</p>', unsafe_allow_html=True)
 
-            # ── Scheduling flow (triggered by Schedule: action) ──────
+            # ── Scheduling flow (triggered by reschedule action) ──────
             if st.session_state.get(f"schedule_pending_{eid}"):
                 sched_key = f"schedule_result_{eid}"
                 _sched_desc = st.session_state.get(f"schedule_desc_{eid}", "")
@@ -1036,11 +1201,12 @@ with draft_col:
                 intent = sched.get("meeting_intent", {})
                 slots = sched.get("free_slots", [])
                 sched_err = sched.get("error")
+                _is_reschedule = st.session_state.get(f"schedule_mode_{eid}") == "reschedule"
 
                 if sched_err and not slots:
                     st.warning(f"Could not find slots: {sched_err}")
                 elif slots:
-                    st.markdown("**Available time slots:**")
+                    st.markdown("**Pick a time:**" if _is_reschedule else "**Available time slots:**")
                     for si, (s_start, s_end) in enumerate(slots):
                         try:
                             from datetime import datetime as _dt
@@ -1049,7 +1215,7 @@ with draft_col:
                         except Exception:
                             slot_label = s_start
                         if st.button(slot_label, key=f"slot_{eid}_{si}", use_container_width=True):
-                            with st.spinner("Creating calendar event..."):
+                            with st.spinner("Creating event & drafting response..."):
                                 try:
                                     from tools.zoom_tools import zoom_available
                                     evt = create_event_from_slot(
@@ -1058,23 +1224,43 @@ with draft_col:
                                         end_iso=s_end,
                                         add_zoom=zoom_available(),
                                     )
-                                    # Add a todo item for the scheduled meeting
                                     meeting_summary = evt.get('summary', 'Meeting')
                                     add_todo_item(
                                         task=f"Meeting: {meeting_summary} on {slot_label}",
                                         email_id=email.get("id", ""),
                                     )
                                     st.success(f"Event created: {meeting_summary}")
+                                    # Draft appropriate reply based on mode
+                                    try:
+                                        current_style = st.session_state.get("learned_style") or load_persisted_style()
+                                        if _is_reschedule:
+                                            draft_decision = f"Suggest alternative time: {slot_label}. {_sched_desc}"
+                                            decision_label = f"Suggest time: {slot_label}"
+                                        else:
+                                            draft_decision = f"Accept the meeting/event. {_sched_desc}. Confirmed for {slot_label}."
+                                            decision_label = f"Accept: {slot_label}"
+                                        draft_text = run_drafting_graph(
+                                            email,
+                                            decision=draft_decision,
+                                            style_notes=current_style,
+                                        )
+                                        if draft_text:
+                                            st.session_state[f"reply_generated_{eid}"] = draft_text
+                                            st.session_state[f"_last_decision_{eid}"] = decision_label
+                                    except Exception:
+                                        pass
                                     # Clean up scheduling state
                                     st.session_state.pop(f"schedule_pending_{eid}", None)
                                     st.session_state.pop(f"schedule_desc_{eid}", None)
+                                    st.session_state.pop(f"schedule_mode_{eid}", None)
                                     st.session_state.pop(sched_key, None)
                                 except Exception as e:
                                     st.error(f"Failed to create event: {e}")
                             st.rerun()
-                    if st.button("Cancel scheduling", key=f"sched_cancel_{eid}"):
+                    if st.button("Cancel", key=f"sched_cancel_{eid}"):
                         st.session_state.pop(f"schedule_pending_{eid}", None)
                         st.session_state.pop(f"schedule_desc_{eid}", None)
+                        st.session_state.pop(f"schedule_mode_{eid}", None)
                         st.session_state.pop(sched_key, None)
                         st.rerun()
                 else:
@@ -1082,6 +1268,7 @@ with draft_col:
                     if st.button("Cancel", key=f"sched_cancel2_{eid}"):
                         st.session_state.pop(f"schedule_pending_{eid}", None)
                         st.session_state.pop(f"schedule_desc_{eid}", None)
+                        st.session_state.pop(f"schedule_mode_{eid}", None)
                         st.session_state.pop(sched_key, None)
                         st.rerun()
 
@@ -1093,7 +1280,7 @@ with draft_col:
                     with st.spinner("Drafting reply..."):
                         try:
                             current_style = st.session_state.get("learned_style") or load_persisted_style()
-                            draft_text = draft_reply(email, decision=custom, style_notes=current_style)
+                            draft_text = run_drafting_graph(email, decision=custom, style_notes=current_style)
                             if draft_text:
                                 st.session_state[f"reply_generated_{eid}"] = draft_text
                                 st.success("Draft generated.")
@@ -1114,58 +1301,72 @@ with draft_col:
                     key=f"preview_{eid}",
                     label_visibility="collapsed",
                 )
-                send_col, regen_col = st.columns([1, 1])
-                with send_col:
-                    if st.button("Send now", key=f"send_now_{eid}"):
-                        final_draft = st.session_state.get(f"preview_{eid}", draft_val)
-                        with st.spinner("Sending message..."):
-                            try:
-                                to = extract_email_address(email["sender"])
-                                subject = email.get("subject", "")
-                                if not subject.lower().startswith("re:"):
-                                    subject = f"Re: {subject}"
-                                sent = send_email(
-                                    to=to,
-                                    subject=subject,
-                                    body=final_draft,
-                                    thread_id=email.get("thread_id"),
-                                )
-                                st.success("Message sent.")
-                                del st.session_state[f"reply_generated_{eid}"]
-                            except Exception as e:
-                                st.error(f"Failed to send message: {e}")
-                with regen_col:
-                    if st.button("Regenerate", key=f"regen_{eid}"):
-                        # Re-draft with the same decision
-                        _regen_decision = st.session_state.get(f"_last_decision_{eid}", "")
-                        del st.session_state[f"reply_generated_{eid}"]
-                        with st.spinner("Regenerating..."):
-                            try:
-                                current_style = st.session_state.get("learned_style") or load_persisted_style()
-                                draft_text = draft_reply(email, decision=_regen_decision, style_notes=current_style)
-                                if draft_text:
-                                    st.session_state[f"reply_generated_{eid}"] = draft_text
-                            except Exception:
-                                pass
-                        st.rerun()
+                if st.button("Send now", key=f"send_now_{eid}", use_container_width=True):
+                    final_draft = st.session_state.get(f"preview_{eid}", draft_val)
+                    with st.spinner("Sending message..."):
+                        try:
+                            to = extract_email_address(email["sender"])
+                            subject = email.get("subject", "")
+                            if not subject.lower().startswith("re:"):
+                                subject = f"Re: {subject}"
+                            sent = send_email(
+                                to=to,
+                                subject=subject,
+                                body=final_draft,
+                                thread_id=email.get("thread_id"),
+                            )
+                            st.success("Message sent.")
+                            del st.session_state[f"reply_generated_{eid}"]
+                        except Exception as e:
+                            st.error(f"Failed to send message: {e}")
             _custom_col, _archive_col = st.columns([1, 1])
             with _custom_col:
-                if st.button("Custom instruction", key=f"qo_{eid}_custom", use_container_width=True):
-                    st.session_state[f"reply_custom_{eid}"] = True
-                    st.rerun()
+                with st.container(key=f"qa-custom-{eid}"):
+                    if st.button("Custom instruction", key=f"qo_{eid}_custom", use_container_width=True):
+                        st.session_state[f"reply_custom_{eid}"] = True
+                        st.rerun()
             with _archive_col:
-                if st.button("Archive", key=f"archive_{eid}", use_container_width=True):
-                    _arc_id = email.get("id", "")
-                    archive_email(_arc_id)
-                    mark_email_archived(_arc_id)
-                    st.session_state["emails"] = [e for e in st.session_state.get("emails", []) if e.get("id") != _arc_id]
-                    st.session_state.pop("selected_email", None)
-                    st.session_state.pop("selected_email_obj", None)
-                    st.success("Archived.")
-                    st.rerun()
+                with st.container(key=f"qa-archive-{eid}"):
+                    if st.button("Archive", key=f"archive_{eid}", use_container_width=True):
+                        _arc_id = email.get("id", "")
+                        archive_email(_arc_id)
+                        mark_email_archived(_arc_id)
+                        st.session_state["emails"] = [e for e in st.session_state.get("emails", []) if e.get("id") != _arc_id]
+                        st.session_state.pop("selected_email", None)
+                        st.session_state.pop("selected_email_obj", None)
+                        st.success("Archived.")
+                        st.rerun()
 
 with email_col:
-    st.markdown("### Emails")
+    # ── Category filter row ──
+    _filter_labels = get_all_labels()
+    _hidden_cats = st.session_state.get("_hidden_cats", set())
+
+    _hdr_col, _filter_col = st.columns([1, 2])
+    with _hdr_col:
+        _n_hidden = len(_hidden_cats)
+        if _n_hidden:
+            st.markdown(f"### Emails <span style='font-size:11px;font-weight:400;color:{muted_color};'>&middot; {_n_hidden} hidden</span>", unsafe_allow_html=True)
+        else:
+            st.markdown("### Emails")
+    with _filter_col:
+        # Multiselect showing visible categories — all selected by default
+        _all_slugs = [lb["slug"] for lb in _filter_labels]
+        _all_names = {lb["slug"]: lb.get("display_name", lb["slug"]) for lb in _filter_labels}
+        _visible = [s for s in _all_slugs if s not in _hidden_cats]
+        _selected = st.multiselect(
+            "Filter",
+            options=_all_slugs,
+            default=_visible,
+            format_func=lambda s: _all_names.get(s, s),
+            key="_cat_multifilter",
+            label_visibility="collapsed",
+            placeholder="Filter categories...",
+        )
+        # Sync selection back to hidden state
+        _new_hidden = set(_all_slugs) - set(_selected)
+        if _new_hidden != _hidden_cats:
+            st.session_state["_hidden_cats"] = _new_hidden
 
     # ── Search bar ──
     _search_q = st.text_input("Search", key="_email_search", placeholder="Filter by subject or sender...", label_visibility="collapsed")
@@ -1217,11 +1418,13 @@ with email_col:
         date_html = html.escape(str(date_simple))
         summary_html = html.escape(str(summary))
 
-        # Build badges — one per tag (system + custom)
+        # Build badges — one per tag (system + custom), skip deleted/unknown tags
         _badge_parts = []
         for _tag in cat_tags:
+            if _tag not in _label_display_map:
+                continue  # tag was deleted or unknown — don't render
             _cb_color = _label_color_map.get(_tag, "#94a3b8")
-            _cb_display = _label_display_map.get(_tag, _tag.replace("-", " ").title())
+            _cb_display = _label_display_map[_tag]
             _badge_parts.append(f"<span class='badge-category' style='color:{_cb_color};border-color:{_cb_color}40;background:{_cb_color}18;'>{html.escape(str(_cb_display))}</span>")
         badges = " ".join(_badge_parts)
 
@@ -1250,39 +1453,29 @@ with email_col:
     <script>
     (function() {
         try {
-            const parentDoc = window.parent.document;
-            function setupCardClicks() {
-                try {
-                    const cards = parentDoc.querySelectorAll('.email-card');
-                    cards.forEach(card => {
-                        if (card.dataset.clickSetup) return;
-                        card.dataset.clickSetup = 'true';
-                        
-                        // Walk up to find the stVerticalBlock container
-                        let el = card;
-                        while (el && !el.matches('[data-testid="stVerticalBlock"]')) {
-                            el = el.parentElement;
-                        }
-                        if (!el) return;
-                        
-                        // Find the button within this container
-                        const btn = el.querySelector('button');
-                        if (!btn) return;
-                        
-                        card.addEventListener('click', function(e) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            try { btn.click(); } catch(_) {}
-                        });
-                    });
-                } catch(_) {}
-            }
-            
-            // Run setup after a delay and on mutations
-            setTimeout(setupCardClicks, 500);
-            const observer = new MutationObserver(() => setTimeout(setupCardClicks, 200));
-            observer.observe(parentDoc.body, { childList: true, subtree: true });
-            setTimeout(() => observer.disconnect(), 15000);
+            var doc = window.parent.document;
+            // Guard: attach the delegated handler only once
+            if (doc._emailCardClickReady) return;
+            doc._emailCardClickReady = true;
+
+            // Single delegated click handler — never needs re-attachment,
+            // works regardless of DOM mutations or Streamlit rerenders.
+            doc.addEventListener('click', function(e) {
+                var card = e.target.closest('.email-card');
+                if (!card) return;
+                // Walk up to the stVerticalBlock that wraps this card
+                var block = card;
+                while (block && !block.matches('[data-testid="stVerticalBlock"]')) {
+                    block = block.parentElement;
+                }
+                if (!block) return;
+                var btn = block.querySelector('button');
+                if (btn) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    btn.click();
+                }
+            }, true); // capture phase — runs before React handlers
         } catch(_) {}
     })();
     </script>

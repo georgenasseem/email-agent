@@ -344,6 +344,34 @@ def fetch_sent_samples(max_results: int = 20) -> list[str]:
     return samples
 
 
+def fetch_sent_to_contact(contact_email: str, max_results: int = 5) -> list[str]:
+    """Fetch recent emails sent TO a specific contact. Returns list of body strings.
+    
+    Used to learn how the user addresses this particular contact.
+    """
+    try:
+        service = get_gmail_service()
+        results = service.users().messages().list(
+            userId="me",
+            maxResults=max_results,
+            q=f"in:sent to:{contact_email}",
+        ).execute()
+        messages = results.get("messages", [])
+        bodies = []
+        for msg_ref in messages:
+            try:
+                msg = service.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
+                payload = msg.get("payload", {})
+                body = decode_message_body(payload)
+                if body:
+                    bodies.append(body[:2000])
+            except Exception:
+                continue
+        return bodies
+    except Exception:
+        return []
+
+
 def send_email(
     to: str,
     subject: str,

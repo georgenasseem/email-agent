@@ -28,3 +28,6 @@ data/*.db
 data/profile.json
 data/style_profile.json
 data/style_samples/
+
+# OS
+.DS_Store

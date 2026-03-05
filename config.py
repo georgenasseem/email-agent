@@ -15,7 +15,7 @@ TOKEN_FILE = PROJECT_ROOT / "token.json"  # Gmail authentication token
 # LLM_PROVIDER: "groq" | "qwen_local_3b" | "qwen_local_7b"
 # For Groq: GROQ_API_KEY, GROQ_MODEL, GROQ_FAST_MODEL
 # For local Qwen: GGUF model paths loaded via llama-cpp-python
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "qwen_local_3b")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 # Fast/cheap model for lightweight tasks (categorise, extract entities, summarise).

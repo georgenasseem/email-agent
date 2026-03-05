@@ -9,32 +9,57 @@ from langchain_core.output_parsers import StrOutputParser
 from agent.llm import get_llm
 from agent.style_learner import load_persisted_style
 from agent.profile import load_profile
-from agent.email_memory import build_memory_context, get_sender_history
+from agent.email_memory import build_memory_context, get_sender_history, get_greeting_for_contact
 
 logger = logging.getLogger(__name__)
 
 
 def analyze_roles(email: dict) -> dict:
-    """Infer who is who in the thread so the model keeps the correct POV."""
+    """Infer who is who in the thread so the model keeps the correct POV.
+    
+    Also looks up how the user previously addressed this sender for
+    contact-specific greetings (e.g. 'Dear Professor' vs 'Dear Hanan').
+    """
     try:
         profile = load_profile()
     except Exception:
         profile = {}
     user_email = (profile.get("email") or "").lower()
-    other_email = (email.get("sender") or "").lower()
+    user_name = profile.get("display_name") or profile.get("first_name") or ""
+    other_email_raw = (email.get("sender") or "").lower()
 
-    # Heuristic: in this app, the user is the authenticated Gmail account,
-    # and incoming emails have sender = other party.
-    user_is_recipient = True
-    user_is_sender = False
+    # Extract clean email address
+    if "<" in other_email_raw and ">" in other_email_raw:
+        other_email = other_email_raw.split("<")[1].split(">")[0].strip()
+    else:
+        other_email = other_email_raw.strip()
+
+    # Extract display name from sender header
+    sender_header = email.get("sender", "")
+    _name_match = re.match(r'^([^<]+)', sender_header)
+    other_display_name = ""
+    if _name_match:
+        other_display_name = _name_match.group(1).strip().strip('"').strip("'")
+    if not other_display_name or "@" in other_display_name:
+        other_display_name = other_email.split("@")[0] if "@" in other_email else other_email or "there"
+
+    # Look up how user previously addressed this contact
+    contact_greeting = ""
+    try:
+        contact_greeting = get_greeting_for_contact(other_email)
+    except Exception:
+        pass
 
     return {
         "user_email": user_email or "you@example.com",
+        "user_name": user_name,
         "other_party_email": other_email,
-        "other_party_name": other_email.split("@")[0] if "@" in other_email else other_email or "sender",
+        "other_display_name": other_display_name,
+        "other_first_name": other_display_name.split()[0] if other_display_name else "there",
+        "contact_greeting": contact_greeting,  # e.g. "Dear Professor Salam" or ""
         "thread_role": {
-            "user_is_recipient": user_is_recipient,
-            "user_is_sender": user_is_sender,
+            "user_is_recipient": True,
+            "user_is_sender": False,
         },
     }
 
@@ -138,8 +163,11 @@ def draft_reply(
 ) -> str:
     """
     Draft a reply to the email.
-    - decision: user's choice (e.g. "Yes", "No", "Attend")
+    - decision: user's choice from quick actions (e.g. "Accept the meeting", "Ask for details")
     - style_notes: optional, e.g. "I write short, friendly emails"
+    
+    Architecture: Quick actions decided WHAT to do. This function figures out HOW.
+    It thinks like the user and talks like the user.
     """
     try:
         llm = get_llm(task="draft")
@@ -152,13 +180,12 @@ def draft_reply(
         except Exception:
             persisted = ""
         
-        # Build style instruction without hardcoded greeting/closing
+        # Build style instruction
         if style_notes:
             style = f"Write in this style description: {style_notes}"
         elif persisted:
             style = (
-                "Match this user style description as closely as possible, "
-                "including how they open and close emails:\n"
+                "Match this user style description as closely as possible:\n"
                 f"{persisted}"
             )
         else:
@@ -175,37 +202,42 @@ def draft_reply(
                     signature_name = line.split(":", 1)[1].strip()
                     break
 
+        # Extract greeting PATTERN (e.g. "Dear", "Hi") from style
+        greeting_pattern = ""
+        if persisted:
+            for line in persisted.splitlines():
+                if line.strip().upper().startswith("GREETING_STYLE:"):
+                    greeting_pattern = line.split(":", 1)[1].strip()
+                    break
+
         closing_instruction = (
-            f"3. CLOSING: End with a sign-off (e.g. Best regards, Thanks, Best, Sincerely) followed by a newline and the user's name '{signature_name}'."
+            f"3. CLOSING: End with a sign-off (e.g. Best regards, Thanks, Best) followed by a newline and '{signature_name}'."
             if signature_name
-            else "3. CLOSING: End with a sign-off (e.g. Best regards, Thanks, Best, Sincerely) followed by a line break."
+            else "3. CLOSING: End with a sign-off (e.g. Best regards, Thanks, Best) followed by a line break."
         )
 
         roles = analyze_roles(email)
+        _other_display_name = roles.get("other_display_name", "there")
+        _other_first_name = roles.get("other_first_name", "there")
+        _user_name = roles.get("user_name", "")
+        _user_email = roles.get("user_email", "")
+        _contact_greeting = roles.get("contact_greeting", "")
 
-        # Extract the OTHER person's display name (not the user's own name)
-        _other_sender = email.get('sender', '') or ''
-        _other_name_match = re.match(r'^([^<]+)', _other_sender)
-        _other_display_name = ''
-        if _other_name_match:
-            _other_display_name = _other_name_match.group(1).strip().strip('"').strip("'")
-        if not _other_display_name or '@' in _other_display_name:
-            _other_display_name = _other_sender.split('@')[0] if '@' in _other_sender else 'there'
-        # Extract first name only for greeting
-        _other_first_name = _other_display_name.split()[0] if _other_display_name else 'there'
+        # Build the greeting instruction — contact-specific if available
+        if _contact_greeting:
+            greeting_instruction = (
+                f"1. GREETING: Start with exactly '{_contact_greeting},' — this is how you always address this person."
+            )
+        elif greeting_pattern and greeting_pattern.lower() not in ("(no consistent greeting detected)",):
+            greeting_instruction = (
+                f"1. GREETING: Start with '{greeting_pattern} {_other_first_name},' — use this greeting pattern."
+            )
+        else:
+            greeting_instruction = (
+                f"1. GREETING: Start with an appropriate greeting addressing {_other_first_name}."
+            )
 
-        # Get the user's own name to avoid self-addressing
-        _user_name = ''
-        try:
-            _prof = load_profile()
-            _user_name = _prof.get('display_name', '') or ''
-            if not _user_name:
-                _user_email = _prof.get('email', '')
-                if _user_email:
-                    _user_name = _user_email.split('@')[0]
-        except Exception:
-            pass
-
+        # Build reply plan if the decision has enough substance
         reply_plan = plan_reply(email, decision=decision) if len((decision or "").split()) >= 5 else {
             "goal": f"Respond to the email about '{email.get('subject', '')[:80]}' with intent: {decision or 'General response'}",
             "key_points": ["Address the main request", "Indicate next steps if any"],
@@ -213,34 +245,41 @@ def draft_reply(
             "risks": [],
         }
 
-        system = f"""You are a professional email drafter. You MUST output a complete email reply with three parts: (1) GREETING, (2) BODY, (3) CLOSING.
+        system = f"""You are drafting an email reply AS the user. You must think like them and write like them.
 
-MANDATORY STRUCTURE - your output MUST include all three:
-1. GREETING: Start with a greeting (e.g. Hi {_other_first_name}, Dear {_other_first_name}, Hello {_other_first_name}). Address THE SENDER, NOT yourself.
-2. BODY: 2-4 sentences addressing the email content. Incorporate the user's intent: {decision if decision else "General response"} and the reply plan below.
+MANDATORY STRUCTURE — output MUST include all three parts:
+{greeting_instruction}
+2. BODY: 2-4 sentences addressing the email content. Execute the user's intent: {decision if decision else "General response"}
 {closing_instruction}
 
-CRITICAL IDENTITY RULES:
-- You are writing FROM: {roles.get('user_email') or 'the user'}{f' ({_user_name})' if _user_name else ''}.
+ABSOLUTE IDENTITY RULES (NEVER VIOLATE):
+- You ARE: {_user_email}{f' ({_user_name})' if _user_name else ''}. You are writing FROM this person.
 - You are writing TO: {roles.get('other_party_email') or 'the sender'} (name: {_other_display_name}).
-- The greeting MUST address {_other_first_name} (the sender), NEVER address {_user_name or 'yourself'}.
-- If the sender name equals the user name, use a generic greeting like "Hi" instead.
+- The greeting MUST address {_other_display_name} (the recipient), NEVER address yourself ({_user_name}).
+- NEVER introduce yourself as the sender's name. You are {_user_name or 'the user'}.
+- If the original email was sent BY someone, your reply is TO them — not FROM them.
+
+ANTI-COPYING RULES (CRITICAL):
+- NEVER copy, paraphrase, or echo the original email's sentences back.
+- NEVER repeat the sender's own words or phrases from their email.
+- Write ORIGINAL content that RESPONDS to what they said, don't summarize what they said.
+- Your reply should contain NEW information, decisions, or questions — not a restatement.
 
 STYLE: {style}
 
 RULES:
-- Output ONLY the email body text. No subject line. No markdown.
-- Never output just "Thank you for your message" - always include greeting, substantive body, and closing.
+- Output ONLY the email body text. No subject line. No markdown. No quotes.
 - Sound natural. Match the tone of the original email when appropriate.
+- Be concise — aim for the minimum words needed to communicate clearly.
 
-REPLY PLAN (authoritative):
+REPLY PLAN (what to accomplish):
 - Goal: {reply_plan.get('goal', '')}
 - Key points: {', '.join(reply_plan.get('key_points', []) or [])}
 - Tone: {reply_plan.get('tone', 'neutral')}"""
 
         decision_text = ""
         if decision:
-            decision_text = f"\n\nUser chose this reply intent: {decision}. The body must reflect this choice."
+            decision_text = f"\n\nUser chose this action: {decision}. The reply must execute this choice."
 
         subject_text = email.get('subject', '')[:100]
         body_text = (email.get('clean_body') or email.get('body', '') or email.get('snippet', ''))[:600]
@@ -253,7 +292,7 @@ REPLY PLAN (authoritative):
         except Exception:
             pass
 
-        # Build profile context from profile.json
+        # Build profile context
         profile_ctx = ""
         try:
             _full_prof = load_profile()
@@ -272,7 +311,7 @@ REPLY PLAN (authoritative):
         except Exception:
             pass
 
-        # Pull sender history
+        # Pull sender history for context
         sender_history = ""
         try:
             from tools.gmail_tools import extract_email_address
@@ -286,12 +325,15 @@ REPLY PLAN (authoritative):
         except Exception:
             pass
 
-        prompt = f"""Reply to this email. Sender: {_other_display_name}. Subject: {subject_text}
+        prompt = f"""Reply to this email as {_user_name or 'the user'}.
 
-Email content:
+Sender (you're replying TO): {_other_display_name} <{roles.get('other_party_email', '')}>
+Subject: {subject_text}
+
+Their email:
 {body_text}
 
-Thread context (recent messages in this conversation, if any):
+Thread context:
 {thread_ctx}
 
 {(email.get('enriched_context') or '')[:500]}
@@ -302,7 +344,7 @@ Thread context (recent messages in this conversation, if any):
 
 {sender_history}{decision_text}
 
-Write a complete reply with greeting, body, and closing (body only, no subject):"""
+Write a complete reply (greeting + body + closing). Do NOT copy their email — write original content:"""
 
         chain = llm | parser
         draft = chain.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
@@ -314,7 +356,6 @@ Write a complete reply with greeting, body, and closing (body only, no subject):
             last_lines = result.rsplit("\n", 2)
             last_text = "".join(last_lines[-2:]).lower()
             if signature_name.lower() not in last_text:
-                # Append name after closing if missing
                 result = result.rstrip()
                 if not result.endswith(signature_name):
                     result = f"{result}\n\n{signature_name}"

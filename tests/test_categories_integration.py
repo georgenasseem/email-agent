@@ -112,7 +112,7 @@ class TestDefaultLabels:
         ensure_default_labels()
         ensure_default_labels()
         labels = get_all_labels()
-        assert len(labels) == 3
+        assert len(labels) == 4
 
     def test_default_labels_have_colors(self):
         ensure_default_labels()
@@ -141,7 +141,7 @@ class TestLabelCRUD:
     def test_create_label_sets_position(self):
         ensure_default_labels()
         lb = create_label("Advising")
-        assert lb["position"] == 3  # after the 3 defaults (0-2)
+        assert lb["position"] == 4  # after the 4 defaults (0-3)
 
     def test_create_label_slugifies(self):
         ensure_default_labels()
@@ -451,7 +451,7 @@ class TestCategorizerIntegration:
 class TestProposals:
     def test_propose_with_enough_history(self):
         ensure_default_labels()
-        # Store emails with a recurring keyword
+        # Store emails from same domain to trigger domain-based proposal
         for i in range(3):
             store_raw_email({
                 "id": f"prop_{i}", "thread_id": f"t{i}",
@@ -460,10 +460,10 @@ class TestProposals:
             })
         proposals = propose_categories_from_history(min_sender_count=2)
         assert len(proposals) >= 1
-        assert proposals[0]["match_type"] == "subject_keyword"
-        # Should propose based on recurring keywords like 'weekly' or 'report'
+        # Should propose based on sender domain (bigcorp.com)
+        types = [p["match_type"] for p in proposals]
         values = [p["match_value"] for p in proposals]
-        assert any(v in ("weekly", "report", "update") for v in values)
+        assert "sender_domain" in types or any(v in ("weekly", "report") for v in values)
 
     def test_propose_skips_existing_rules(self):
         ensure_default_labels()

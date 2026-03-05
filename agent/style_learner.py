@@ -17,9 +17,11 @@ def _split_non_empty_lines(text: str) -> List[str]:
 
 def _extract_structure(samples: List[str]) -> Tuple[str, str, str]:
     """
-    Heuristically extract typical greeting, closing phrases, and signature name from sent emails.
-    This is deterministic and does not rely on the LLM.
-    Returns (greeting_style, closing_style, signature_name).
+    Heuristically extract typical greeting PATTERN, closing phrases, and signature name.
+    
+    IMPORTANT: The greeting pattern extracts only the greeting word/phrase (e.g. "Dear", "Hi"),
+    NOT the specific recipient name. The recipient name varies per email and should be
+    determined contextually by the drafter.
     """
     greeting_counter: Counter[str] = Counter()
     closing_counter: Counter[str] = Counter()
@@ -48,6 +50,20 @@ def _extract_structure(samples: List[str]) -> Tuple[str, str, str]:
         base = line.strip().rstrip(",")
         return base
 
+    def _extract_greeting_word(line: str) -> str:
+        """Extract just the greeting word/phrase without the recipient name.
+        
+        'Dear Professor Salam' → 'Dear'
+        'Hi Alex' → 'Hi'
+        'Hello' → 'Hello'
+        """
+        stripped = line.strip().rstrip(",")
+        # Match common greeting words at the start
+        m = re.match(r'^(dear|hi|hello|hey|salam|assalamu\s+alaikum|as-salamu\s+alaikum)\b', stripped, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+        return stripped
+
     for raw in samples[:10]:
         if not raw:
             continue
@@ -55,11 +71,12 @@ def _extract_structure(samples: List[str]) -> Tuple[str, str, str]:
         if not lines:
             continue
 
-        # GREETING: look at the first few non-empty lines
+        # GREETING: look at the first few non-empty lines — extract only the greeting word
         for line in lines[:4]:
             lower = line.lower()
             if greeting_regex.match(lower):
-                greeting_counter[_normalize_phrase(line)] += 1
+                greeting_word = _extract_greeting_word(line)
+                greeting_counter[greeting_word] += 1
                 break
 
         # CLOSING: look at the last few non-empty lines

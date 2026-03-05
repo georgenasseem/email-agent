@@ -1,4 +1,8 @@
-"""Suggest contextual quick actions (Reply / Todo) based on email content."""
+"""Suggest contextual quick actions based on email content.
+
+Uses the quick_actions_graph for the main flow. This module provides
+a simpler fallback for the pipeline's suggest_decision_node.
+"""
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import StrOutputParser
 import json
@@ -12,39 +16,31 @@ logger = logging.getLogger(__name__)
 
 
 def suggest_decision(email: dict) -> dict:
-    """Suggest contextual quick actions for an email using LLM only.
+    """Suggest contextual quick actions for an email using LLM.
 
-    Returns {"decision_options": ["Reply: ...", "Todo: ...", ...]}.
-    Each option is prefixed with either "Reply:" or "Todo:".
+    Returns {"decision_options": [{"type": "reply"|"todo", "label": "...", "context": "...", ...}]}.
     """
     llm = get_llm(task="decide")
     parser = StrOutputParser()
 
-    system = """You are an email assistant. Analyze the email and suggest quick actions the user can take.
+    system = """You are an email assistant. Analyze the email and suggest short action labels.
 
-Each action MUST start with exactly one of these prefixes:
-- "Reply: " — a short description of a reply to send TO THE SENDER (e.g. "Reply: Accept the invitation", "Reply: Ask for more details")
-- "Todo: " — a short task the user should do based on this email (e.g. "Todo: Submit hackathon form by Friday", "Todo: Review attached document")
-- "Schedule: " — for meeting/scheduling requests. Creates a calendar event with free slot lookup. (e.g. "Schedule: meeting with John", "Schedule: project review session")
-- "Archive: " — dismiss/archive the email when no action is needed (e.g. "Archive: No action needed", "Archive: FYI only")
+Each action is a JSON object with:
+- "type": "reply" or "todo"
+- "label": SHORT action text (2-6 words). This is what the user sees on the button.
+- "context": Brief hidden context for the AI drafter (who, what, when — 1 sentence).
+- "has_meeting": true if this involves a meeting/event/scheduling component.
+- "meeting_action": "accept" | "decline" | "reschedule" | null. Only when has_meeting is true.
 
 CRITICAL RULES:
-- Reply actions are messages TO SEND to the other person. They must make sense as something you'd say TO THEM.
-- NEVER suggest replies that read like personal notes (e.g. "Reply: Check the update", "Reply: Read the document", "Reply: Review the details"). These should be Todo items instead.
-- Replies must be conversational actions: accepting, declining, requesting info, confirming, thanking, asking questions, etc.
-- Only suggest Reply actions if the email actually warrants a reply. Newsletters, automated notifications, marketing emails, FYI-only emails, and system confirmations do NOT need replies.
-- If the email is purely informational (a notification, receipt, or announcement), suggest ONLY Todo or Archive actions.
-- For newsletters, marketing, and no-reply senders, include an "Archive:" action.
-- If the email mentions a meeting, call, appointment, or catch-up, ALWAYS include one "Schedule:" action.
-- Schedule actions describe WHAT to schedule, NEVER specific dates or times. The scheduling system will check the user's calendar for availability. Examples:
-  GOOD: "Schedule: meeting with Dr. Smith", "Schedule: workshop follow-up call"
-  BAD: "Schedule: 1:45 PM meeting", "Schedule: meeting on March 5th", "Schedule: 30 min call at 2pm"
-- Todo actions should be concrete, one-sentence tasks extracted from the email content.
-- Suggest 1-4 actions total. Quality over quantity — fewer good suggestions beat many bad ones.
-- Each action description should be concise (under 10 words after the prefix).
-- Do NOT suggest generic actions. Every action must be specific to THIS email's content.
+- Reply actions are what you'd SAY to the sender. Labels: "Agree to meeting", "Ask for details", "Confirm attendance".
+- Todo actions are tasks for the user. Labels: "Submit form by Friday", "Review proposal".
+- For meeting/event emails: suggest accept, decline, and optionally reschedule options (all type="reply" with has_meeting=true).
+- Do NOT suggest actions for newsletters, automated notifications, marketing emails.
+- Labels must be SHORT (2-6 words). Details go in "context".
+- Suggest 1-4 actions total.
 
-Output ONLY a JSON array of strings. No other text."""
+Output ONLY a JSON array of objects. No other text."""
 
     subject = email.get("subject", "")[:120]
     body_text = (email.get("clean_body") or email.get("body") or email.get("snippet") or "")[:1200]
@@ -53,14 +49,14 @@ Output ONLY a JSON array of strings. No other text."""
     category = email.get("category", "normal")
     needs_action = bool(email.get("needs_action"))
 
-    # Pull rich memory context from the persistent brain
+    # Pull rich memory context
     memory_ctx = ""
     try:
         memory_ctx = build_memory_context(email, max_linked=5)[:600]
     except Exception:
         pass
 
-    # Pull sender history for additional context
+    # Pull sender history
     sender_history = ""
     try:
         from tools.gmail_tools import extract_email_address
@@ -79,10 +75,10 @@ Subject: {subject}
 Category: {category}
 Needs action: {needs_action}
 Content: {body_text}
-Thread context (recent messages in THIS thread, if any):
+Thread context:
 {thread_ctx}
 
-Related emails (other threads that may be about the same topic or sender/domain):
+Related emails:
 {related_ctx}
 
 {(email.get('enriched_context') or '')[:500]}
@@ -91,13 +87,12 @@ Related emails (other threads that may be about the same topic or sender/domain)
 
 {sender_history}
 
-Suggest quick actions (ONLY JSON ARRAY of "Reply: ..." and/or "Todo: ..." strings):"""
+Suggest quick actions (JSON array of action objects):"""
 
     try:
         chain = llm | parser
         raw = chain.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
 
-        # Clean up response and robustly extract JSON array
         text = (raw or "").strip()
         text = re.sub(r"^```[a-zA-Z0-9_]*\s*", "", text)
         text = re.sub(r"```\s*$", "", text).strip()
@@ -106,24 +101,52 @@ Suggest quick actions (ONLY JSON ARRAY of "Reply: ..." and/or "Todo: ..." string
         if start != -1 and end != -1 and end > start:
             text = text[start : end + 1]
 
-        # Parse JSON
         options = json.loads(text)
 
         if isinstance(options, list) and options:
-            # Ensure all options are strings with valid prefixes, deduplicate
-            cleaned: list[str] = []
+            cleaned: list[dict] = []
             seen = set()
             for o in options:
-                s = str(o).strip()
-                key = s.lower()
-                if not s or key in seen:
-                    continue
-                # Ensure proper prefix
-                if not (s.startswith("Reply:") or s.startswith("Todo:") or s.startswith("Schedule:") or s.startswith("Archive:")):
-                    continue
-                seen.add(key)
-                cleaned.append(s)
-            if len(cleaned) >= 1:
+                if isinstance(o, dict):
+                    label = str(o.get("label", "")).strip()
+                    if not label:
+                        continue
+                    key = label.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    action_type = o.get("type", "reply")
+                    if action_type not in ("reply", "todo"):
+                        action_type = "reply"
+                    action = {
+                        "type": action_type,
+                        "label": label,
+                        "context": str(o.get("context", "")).strip(),
+                        "has_meeting": bool(o.get("has_meeting", False)),
+                        "meeting_action": o.get("meeting_action") if o.get("has_meeting") else None,
+                    }
+                    if action["meeting_action"] not in (None, "accept", "decline", "reschedule"):
+                        action["meeting_action"] = None
+                    cleaned.append(action)
+                elif isinstance(o, str):
+                    # Backward compat: handle plain string from old format
+                    s = o.strip()
+                    if not s:
+                        continue
+                    key = s.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    # Parse old prefix format
+                    if s.startswith("Reply:"):
+                        cleaned.append({"type": "reply", "label": s[6:].strip(), "context": s[6:].strip(), "has_meeting": False, "meeting_action": None})
+                    elif s.startswith("Todo:"):
+                        cleaned.append({"type": "todo", "label": s[5:].strip(), "context": s[5:].strip()})
+                    elif s.startswith("Schedule:"):
+                        cleaned.append({"type": "reply", "label": s[9:].strip(), "context": s[9:].strip(), "has_meeting": True, "meeting_action": "accept"})
+                    else:
+                        cleaned.append({"type": "reply", "label": s, "context": s, "has_meeting": False, "meeting_action": None})
+            if cleaned:
                 return {"decision_options": cleaned[:5]}
     except json.JSONDecodeError as e:
         logger.warning("JSON parse error in decision_suggester: %s (raw: %s)", e, (raw or "")[:500])

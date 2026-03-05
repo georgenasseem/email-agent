@@ -12,15 +12,17 @@ def _get_valid_categories() -> list[str]:
     """Return the list of valid category slugs based on enabled labels.
 
     System categories that have been disabled/deleted by the user are excluded.
+    'action-required' is an internal pipeline tag — excluded from LLM-assignable categories.
     """
+    _INTERNAL_ONLY = {"action-required"}  # Not for LLM selection
     try:
         enabled = get_enabled_labels()
         enabled_slugs = {lb["slug"] for lb in enabled}
-        return [c for c in CATEGORIES if c in enabled_slugs] + [
-            lb["slug"] for lb in enabled if lb["slug"] not in CATEGORIES
+        return [c for c in CATEGORIES if c in enabled_slugs and c not in _INTERNAL_ONLY] + [
+            lb["slug"] for lb in enabled if lb["slug"] not in CATEGORIES and lb["slug"] not in _INTERNAL_ONLY
         ]
     except Exception:
-        return CATEGORIES
+        return [c for c in CATEGORIES if c not in _INTERNAL_ONLY]
 
 
 def _build_preview(email: dict) -> str:
@@ -30,12 +32,17 @@ def _build_preview(email: dict) -> str:
 
 
 def _apply_newsletter_heuristics(email: dict, category: str) -> str:
-    """Force obvious newsletters/announcements into 'newsletter' unless clearly security-critical."""
+    """Force obvious newsletters/announcements into 'newsletter' unless clearly security-critical.
+
+    IMPORTANT: Educational senders (.edu domains) are exempt from sender-only
+    heuristics because universities use noreply addresses for legitimate
+    course announcements, administrative emails, and calendar invitations.
+    """
     sender = (email.get("sender") or "").lower()
     subject = (email.get("subject") or "").lower()
     preview = _build_preview(email).lower()
 
-    # Security-style newsletters are allowed to stay non-newsletter
+    # Security-style emails are never newsletters
     security_terms = [
         "security alert",
         "verify your account",
@@ -46,26 +53,49 @@ def _apply_newsletter_heuristics(email: dict, category: str) -> str:
         "token expired",
     ]
     if any(t in preview or t in subject for t in security_terms):
-        return category  # keep whatever the model chose
+        return category
 
-    # Strong newsletter / bulk-mail signals
-    newsletter_signals = [
+    # Calendar invitations / event invites are never newsletters
+    invitation_signals = [
+        "invitation:",
+        "invited you to",
+        "you're invited",
+        "you have been invited",
+        "rsvp",
+        "event:",
+    ]
+    if any(s in subject for s in invitation_signals):
+        return category
+
+    # Detect .edu senders — exempt from sender-only heuristics
+    _is_edu = ".edu" in sender
+
+    # Strong newsletter / bulk-mail signals (content-based)
+    newsletter_content_signals = [
         "newsletter",
         "news letter",
         "digest",
         "weekly update",
         "monthly update",
         "view this email in your browser",
-        "manage your preferences",
-        "unsubscribe",
         "update your preferences",
         "marketing",
     ]
-    sender_signals = ["noreply", "no-reply", "newsletter@", "mailchimp", "cmail20.com"]
 
-    if any(s in subject or s in preview for s in newsletter_signals) or any(
-        s in sender for s in sender_signals
-    ):
+    # Sender-based signals — only apply to non-.edu senders
+    sender_signals = ["noreply", "no-reply", "newsletter@", "mailchimp", "cmail20.com"]
+    _has_sender_signal = not _is_edu and any(s in sender for s in sender_signals)
+
+    # Content signals that are strong evidence of newsletter
+    _has_content_signal = any(s in subject or s in preview for s in newsletter_content_signals)
+
+    # "unsubscribe" + "manage your preferences" together are strong signals
+    _has_unsubscribe = "unsubscribe" in preview
+    _has_manage_prefs = "manage your preferences" in preview
+    _has_strong_content = _has_content_signal or (_has_unsubscribe and _has_manage_prefs)
+
+    # Require EITHER strong content signal OR (sender signal + at least unsubscribe)
+    if _has_strong_content or (_has_sender_signal and _has_unsubscribe):
         return "newsletter"
 
     return category
@@ -116,8 +146,9 @@ def categorize_email(email: dict) -> dict:
         pass
 
     # Build the extra labels block for the prompt
+    # Exclude 'action-required' — it's an internal tag, not an LLM-assignable category
     user_labels_block = ""
-    user_label_slugs = [s for s in valid_cats if s not in CATEGORIES]
+    user_label_slugs = [s for s in valid_cats if s not in CATEGORIES and s != "action-required"]
     if user_label_slugs:
         label_lines = []
         for lb in all_labels:
@@ -128,9 +159,9 @@ def categorize_email(email: dict) -> dict:
 
     # Build dynamic category descriptions for enabled system categories only
     _cat_descriptions = {
-        "important": "- important: The sender PERSONALLY expects YOU to take action — reply to their question, approve something, complete a task with a deadline. NOT for: general announcements, event invitations sent to many people, informational updates, or reminders.",
-        "informational": "- informational: Everything that is not a newsletter and does not require YOUR personal action. Announcements, event invitations, updates, FYI, reminders, meeting updates, group emails, notifications. DEFAULT when unsure.",
-        "newsletter": "- newsletter: Marketing, newsletters, promotions, unsubscribe links, mass mailings.",
+        "important": "- important: The sender PERSONALLY and DIRECTLY asks YOU (by name or as the sole/primary recipient) to do something specific — reply to a direct question, approve, submit, provide feedback. Must be a PERSONAL request. NOT important: mass emails from admin/VP/Dean, group announcements, event invitations, course updates, service notifications, reminder blasts.",
+        "informational": "- informational: Everything that is not a newsletter and does not require YOUR PERSONAL action. Announcements from admin/leadership, event invitations (even with RSVP/deadlines), group emails, meeting reminders, course notifications, club emails, system notifications, service emails (Adobe, Zoom, etc.), admin notices. This is the DEFAULT — use when unsure.",
+        "newsletter": "- newsletter: Marketing emails, promotional offers, digests, mass mailings with unsubscribe links, automated product emails.",
     }
     _enabled_sys_cats = [c for c in CATEGORIES if c in valid_cats]
     _cat_block = "\n".join(_cat_descriptions[c] for c in _enabled_sys_cats if c in _cat_descriptions)
@@ -149,10 +180,11 @@ def categorize_email(email: dict) -> dict:
 MAIN CATEGORIES (use exactly these words):
 {_cat_block}{user_labels_block}{_extra_instruction}
 
-CRITICAL:
-- "newsletter": Newsletters, marketing, promotions, "click here", tracking pixels, noreply senders.
-- "informational": Announcements, event invitations sent to many people, routine confirmations, reminders, meeting updates, group notifications, no reply needed. DEFAULT when unsure between important and informational.
-- "important": ONLY when the sender personally and directly asks YOU to do something specific — reply to a direct question, approve a request, complete a task with a deadline. Mass announcements, event invitations, and general updates are NOT important even if they contain deadlines.
+CRITICAL — read these before deciding:
+- "newsletter": Marketing, promotions, automated product emails, digests. NOT for university course announcements or admin emails.
+- "informational": Announcements, invitations, group emails, reminders, meeting updates, course/university notifications, service notifications (Adobe, Zoom, etc.), admin notices from leadership. DEFAULT when unsure.
+- "important": ONLY when ALL are true: (1) sender personally addresses YOU, (2) specifically asks YOU to take action, (3) NOT a mass/group email. Emails from VP/Dean/admin to all students are NEVER important.
+- NEVER use "action-required" as a category — it does not exist as a valid option.
 
 Output ONLY the category slug (or main,extra if an additional tag applies)."""
 
