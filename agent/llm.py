@@ -8,9 +8,10 @@ from config import get_llm_config, get_task_profile
 
 logger = logging.getLogger(__name__)
 
-# ─── Global rate-limit state (shared across ALL SimpleLLM instances) ─────────
-# Prevents overwhelming API rate limits when many instances are created in bulk.
-_global_last_request_time: float = 0.0
+# ─── Per-backend rate-limit state ───────────────────────────────────────────
+# Separate trackers per backend so a local model call doesn't eat into the
+# Groq cooldown window and vice versa.
+_backend_last_request_time: dict[str, float] = {}
 
 # ─── Simple response cache ──────────────────────────────────────────────────
 # Keyed by (model, temperature, prompt_hash).  Avoids redundant LLM calls on
@@ -57,6 +58,35 @@ def _build_openai_messages(messages: List[object]) -> list[dict]:
     return openai_messages or [{"role": "user", "content": _join_messages(messages)}]
 
 
+# ─── Local model singleton cache ────────────────────────────────────────────
+# Loading a GGUF model takes several seconds and ~2GB+ RAM.  We cache the
+# Llama instance so it is loaded ONCE per model path, then reused across
+# all SimpleLLM instances and tasks within the same process.
+_LOCAL_MODEL_CACHE: dict[str, object] = {}
+
+
+def _get_local_model(model_path: str):
+    """Return a cached Llama instance, loading the model only on first call."""
+    if model_path in _LOCAL_MODEL_CACHE:
+        return _LOCAL_MODEL_CACHE[model_path]
+
+    import os
+    from llama_cpp import Llama
+
+    n_threads = max(1, (os.cpu_count() or 4) // 2)
+    model = Llama(
+        model_path=model_path,
+        chat_format="chatml",
+        verbose=False,
+        n_ctx=8192,
+        n_gpu_layers=-1,
+        n_batch=512,          # Process prompts in larger batches (default 8 → 512)
+        n_threads=n_threads,  # Parallel CPU threads for prompt processing
+    )
+    _LOCAL_MODEL_CACHE[model_path] = model
+    return model
+
+
 class SimpleLLM:
     """Unified LLM interface for different providers with task-aware settings."""
 
@@ -67,7 +97,8 @@ class SimpleLLM:
         self.task = task
         self._client = None
         self._last_request_time = 0
-        self._min_request_interval = 0.5
+        # Local models don't need rate-limiting (no API quota)
+        self._min_request_interval = 0.0 if backend == "local" else 0.5
 
         # Task-aware defaults from config
         profile = get_task_profile(task)
@@ -83,14 +114,7 @@ class SimpleLLM:
                 self._client = None
         elif backend == "local":
             try:
-                from llama_cpp import Llama
-                self._client = Llama(
-                    model_path=key_or_path,
-                    chat_format="chatml",
-                    verbose=False,
-                    n_ctx=8192,  # Increased from 4096 — enriched prompts are larger now
-                    n_gpu_layers=-1,
-                )
+                self._client = _get_local_model(key_or_path)
             except Exception:
                 self._client = None
         elif backend in ["anthropic", "fireworks", "groq", "qwen_local"]:
@@ -239,11 +263,12 @@ class SimpleLLM:
         return ""
 
     def _rate_limit_wait(self) -> None:
-        global _global_last_request_time
-        elapsed = time.time() - _global_last_request_time
+        global _backend_last_request_time
+        last = _backend_last_request_time.get(self.backend, 0.0)
+        elapsed = time.time() - last
         if elapsed < self._min_request_interval:
             time.sleep(self._min_request_interval - elapsed)
-        _global_last_request_time = time.time()
+        _backend_last_request_time[self.backend] = time.time()
 
     def _invoke_groq(self, messages: List[object], max_tokens: int, temperature: float) -> str:
         """Groq-specific invocation with retry / rate-limit handling."""
@@ -271,8 +296,8 @@ class SimpleLLM:
                 "https://api.groq.com/openai/v1/chat/completions",
                 json=data, headers=headers, timeout=60,
             )
-            global _global_last_request_time
-            _global_last_request_time = time.time()
+            global _backend_last_request_time
+            _backend_last_request_time[self.backend] = time.time()
 
             if response.status_code == 200:
                 result = response.json()

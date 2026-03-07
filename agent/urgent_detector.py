@@ -62,7 +62,7 @@ def flag_urgent_emails(emails: list[dict]) -> list[dict]:
         needs_action = (
             has_security or  # Always need action for security issues
             (has_urgent and has_action) or  # Urgent + action keywords
-            (category in ["urgent", "important"] and has_action and not has_informational)  # Important emails with action but not clearly informational
+            (category == "important" and has_action and not has_informational)  # Important emails with action but not clearly informational
         )
         
         result.append({**e, "needs_action": needs_action})

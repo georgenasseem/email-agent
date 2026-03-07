@@ -38,24 +38,12 @@ RULES:
 
 Output ONLY the summary sentence (no bullet points, no JSON, no explanations)."""
 
-    body = body_text[:1000]
-    thread_ctx = (email.get("thread_context") or "")[:400]
-    enriched_ctx = (email.get("enriched_context") or "")[:400]
-
-    # Pull memory context
-    memory_ctx = ""
-    try:
-        memory_ctx = build_memory_context(email, max_linked=3)[:300]
-    except Exception:
-        pass
+    body = body_text[:800]
+    thread_ctx = (email.get("thread_context") or "")[:250]
 
     extra = ""
     if thread_ctx:
-        extra += f"\nThread context (recent msgs):\n{thread_ctx}"
-    if enriched_ctx:
-        extra += f"\n{enriched_ctx}"
-    if memory_ctx:
-        extra += f"\n{memory_ctx}"
+        extra += f"\nThread: {thread_ctx}"
 
     prompt = f"""Summarize this email in one sentence (5-80 words). Focus on WHO, WHAT, and WHEN.
 
@@ -63,7 +51,7 @@ From: {email.get('sender','')}
 Subject: {email.get('subject','')}
 Body: {body}{extra}
 
-Write only the summary sentence:"""
+Summary:"""
 
     chain = llm | parser
     raw = chain.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])

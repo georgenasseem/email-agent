@@ -633,6 +633,72 @@ def get_processed_count() -> int:
         return cur.fetchone()[0]
 
 
+# ─── Contact autocomplete ──────────────────────────────────────────────────
+
+
+def get_known_contacts(query: str = "", limit: int = 20) -> List[dict]:
+    """Return known contacts derived from stored emails for autocomplete.
+
+    Each contact has 'email', 'name', and 'count' (number of emails from them).
+    If *query* is provided, filters by partial match on name or email.
+    Results are sorted by frequency (most-emailed first).
+    """
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT sender, COUNT(*) as cnt FROM emails GROUP BY sender ORDER BY cnt DESC"
+        )
+        rows = cur.fetchall()
+
+    contacts: dict[str, dict] = {}
+    for sender_raw, cnt in rows:
+        if not sender_raw:
+            continue
+        addr = _sender_email({"sender": sender_raw})
+        if not addr or "@" not in addr:
+            continue
+        # Extract display name
+        name = ""
+        if "<" in sender_raw:
+            name = sender_raw.split("<")[0].strip().strip('"').strip("'")
+        if not name or "@" in name:
+            name = addr.split("@")[0]
+
+        # Deduplicate by email address, sum counts
+        if addr in contacts:
+            contacts[addr]["count"] += cnt
+        else:
+            contacts[addr] = {"email": addr, "name": name, "count": cnt}
+
+    result = sorted(contacts.values(), key=lambda c: c["count"], reverse=True)
+
+    if query:
+        q = query.lower()
+        result = [c for c in result if q in c["email"].lower() or q in c["name"].lower()]
+
+    return result[:limit]
+
+
+def get_category_counts() -> dict:
+    """Return {category_slug: count} for emails currently in the database."""
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT category FROM email_processed WHERE COALESCE(archived, 0) = 0"
+        )
+        rows = cur.fetchall()
+    counts: dict[str, int] = {}
+    for (cat_raw,) in rows:
+        if not cat_raw:
+            continue
+        tags = [t.strip() for t in cat_raw.split(",") if t.strip()]
+        for tag in tags:
+            counts[tag] = counts.get(tag, 0) + 1
+    return counts
+
+
 # ─── Todo items ─────────────────────────────────────────────────────────────
 
 
@@ -1193,20 +1259,9 @@ def record_category_override(email: dict, new_label_slug: str) -> None:
     subject = (email.get("subject") or "").strip()
 
     # Extract meaningful keywords from the subject (3+ chars, skip stop words)
-    _stop_words = {
-        "the", "and", "for", "are", "but", "not", "you", "all", "can",
-        "had", "her", "was", "one", "our", "out", "has", "his", "how",
-        "its", "may", "new", "now", "old", "see", "way", "who", "did",
-        "get", "let", "say", "she", "too", "use", "your", "this", "that",
-        "with", "have", "from", "they", "been", "said", "each", "which",
-        "will", "very", "when", "what", "just", "about", "more", "would",
-        "make", "like", "been", "than", "them", "some", "could", "other",
-        "into", "then", "these", "also", "please", "hello", "dear", "here",
-        "fwd", "fw",
-    }
     import re as _re
     words = _re.findall(r"[a-zA-Z]{3,}", subject.lower())
-    keywords = [w for w in words if w not in _stop_words]
+    keywords = [w for w in words if w not in STOP_WORDS]
 
     # Create a rule for each meaningful keyword (up to 3 most significant)
     for kw in keywords[:3]:

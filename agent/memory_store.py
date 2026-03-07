@@ -243,6 +243,20 @@ def init_db() -> None:
             cur.execute("ALTER TABLE email_processed ADD COLUMN archived INTEGER DEFAULT 0")
             conn.commit()
 
+        # ── Migration: add opened_at column if missing ──
+        cur.execute("PRAGMA table_info(email_processed)")
+        proc_cols3 = {row[1] for row in cur.fetchall()}
+        if "opened_at" not in proc_cols3:
+            cur.execute("ALTER TABLE email_processed ADD COLUMN opened_at TIMESTAMP DEFAULT NULL")
+            conn.commit()
+
+        # ── Migration: add snoozed_until column if missing ──
+        cur.execute("PRAGMA table_info(email_processed)")
+        proc_cols4 = {row[1] for row in cur.fetchall()}
+        if "snoozed_until" not in proc_cols4:
+            cur.execute("ALTER TABLE email_processed ADD COLUMN snoozed_until TIMESTAMP DEFAULT NULL")
+            conn.commit()
+
         # ── Performance indexes ─────────────────────────────────────────
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_internal_date ON emails(internal_date DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails(sender)")
@@ -265,6 +279,65 @@ def mark_email_archived(gmail_id: str) -> None:
             (gmail_id,),
         )
         conn.commit()
+
+
+def mark_email_opened(gmail_id: str) -> None:
+    """Record when an email was first opened."""
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE email_processed SET opened_at = CURRENT_TIMESTAMP WHERE gmail_id = ? AND opened_at IS NULL",
+            (gmail_id,),
+        )
+        conn.commit()
+
+
+def get_opened_email_ids() -> set:
+    """Return set of gmail_ids that have been opened at least once."""
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT gmail_id FROM email_processed WHERE opened_at IS NOT NULL")
+        return {row[0] for row in cur.fetchall()}
+
+
+def snooze_email(gmail_id: str, until_iso: str) -> None:
+    """Snooze an email until a specific ISO-format datetime string."""
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE email_processed SET snoozed_until = ? WHERE gmail_id = ?",
+            (until_iso, gmail_id),
+        )
+        conn.commit()
+
+
+def unsnooze_email(gmail_id: str) -> None:
+    """Clear a snooze so the email appears immediately."""
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE email_processed SET snoozed_until = NULL WHERE gmail_id = ?",
+            (gmail_id,),
+        )
+        conn.commit()
+
+
+def get_snoozed_email_ids() -> dict:
+    """Return {gmail_id: snoozed_until_str} for all currently-snoozed emails."""
+    import datetime
+    init_db()
+    now = datetime.datetime.utcnow().isoformat()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT gmail_id, snoozed_until FROM email_processed WHERE snoozed_until IS NOT NULL AND snoozed_until > ?",
+            (now,),
+        )
+        return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def reset_db_initialized() -> None:

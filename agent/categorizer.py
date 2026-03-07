@@ -28,7 +28,7 @@ def _get_valid_categories() -> list[str]:
 def _build_preview(email: dict) -> str:
     """Return the best preview text for categorization."""
     text = email.get("clean_body") or email.get("body") or email.get("snippet") or ""
-    return text[:1000]
+    return text[:800]
 
 
 def _apply_newsletter_heuristics(email: dict, category: str) -> str:
@@ -188,25 +188,19 @@ CRITICAL — read these before deciding:
 
 Output ONLY the category slug (or main,extra if an additional tag applies)."""
 
-    preview = _build_preview(email)
-    thread_ctx = (email.get("thread_context") or "")[:300]
-    enriched_ctx = (email.get("enriched_context") or "")[:400]
-    related_ctx = (email.get("related_context") or "")[:300]
+    preview = _build_preview(email)[:800]
+    thread_ctx = (email.get("thread_context") or "")[:200]
 
-    # Pull memory context if available
+    # Pull memory context if available (sender relationship helps categorization)
     memory_ctx = ""
     try:
-        memory_ctx = build_memory_context(email, max_linked=3)[:300]
+        memory_ctx = build_memory_context(email, max_linked=2)[:200]
     except Exception:
         pass
 
     extra_sections = ""
     if thread_ctx:
-        extra_sections += f"\nThread context (recent messages):\n{thread_ctx}"
-    if enriched_ctx:
-        extra_sections += f"\n{enriched_ctx}"
-    if related_ctx:
-        extra_sections += f"\nRelated emails:\n{related_ctx}"
+        extra_sections += f"\nThread context:\n{thread_ctx}"
     if memory_ctx:
         extra_sections += f"\n{memory_ctx}"
 

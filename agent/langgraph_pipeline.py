@@ -24,12 +24,12 @@ from agent.email_memory import (
     build_email_links,
     wipe_processed_data,
     wipe_all_data,
+    STOP_WORDS,
 )
 from agent.style_learner import learn_and_persist_style, load_persisted_style
 from agent.summarizer import summarize_batch
 from agent.categorizer import categorize_emails, categorize_email
 from agent.urgent_detector import flag_urgent_emails
-from agent.decision_suggester import suggest_decision
 from agent.quick_actions_graph import suggest_quick_actions_full
 from agent.delegation import decide_delegation
 from agent.context_enrichment import enrich_batch
@@ -167,8 +167,7 @@ def related_context_node(state: EmailAgentState) -> dict:
     def subject_tokens(e: dict) -> set[str]:
         subj = (e.get("subject") or "").lower()
         tokens = re.findall(r"[a-z0-9]+", subj)
-        stop = {"re", "fwd", "fw", "the", "and", "or", "of", "in", "on", "for", "to"}
-        return {t for t in tokens if len(t) > 2 and t not in stop}
+        return {t for t in tokens if len(t) > 2 and t not in STOP_WORDS}
 
     domains = [sender_domain(e) for e in emails]
     tokens_list = [subject_tokens(e) for e in emails]
@@ -380,15 +379,15 @@ def tag_action_required_node(state: EmailAgentState) -> dict:
         tags = [t.strip() for t in cat_raw.split(",") if t.strip()]
         main_cat = tags[0] if tags else "informational"
         extras = tags[1:]
-        # If main category is 'important' and email has reply-type quick actions → action-required
+        # If main category is 'important' and email has reply or meeting quick actions → action-required
         if main_cat == "important":
             options = e.get("decision_options") or []
-            has_reply_actions = any(
-                (isinstance(o, dict) and o.get("type") == "reply") or
+            has_action = any(
+                (isinstance(o, dict) and o.get("type") in ("reply", "meeting")) or
                 (isinstance(o, str) and o.lower().startswith("reply"))
                 for o in options
             ) if options else False
-            if has_reply_actions:
+            if has_action:
                 e["category"] = ",".join(["action-required"] + extras) if extras else "action-required"
     return {"emails": emails}
 
@@ -457,7 +456,7 @@ def _build_email_graph():
                                                           │
                                                     log_memory
                                                           │
-                                               suggest_decision  (quick-actions sub-graph)
+                                               suggest_decision  (quick-actions unified graph)
                                                           │
                                                tag_action_required
                                                           │
