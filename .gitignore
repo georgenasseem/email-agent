@@ -4,6 +4,7 @@ venv/
 .env
 *.pyc
 __pycache__/
+.pytest_cache/
 
 # IDE
 .idea/
@@ -16,7 +17,6 @@ credentials.json
 
 # Build / cache artifacts
 .uv_cache/
-.pytest_cache/
 
 # Large model files
 models/**/*.gguf
@@ -31,3 +31,4 @@ data/style_samples/
 
 # OS
 .DS_Store
+Thumbs.db

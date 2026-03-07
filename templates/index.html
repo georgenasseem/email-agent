@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Email Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/css/style.css" />
+  </head>
+  <body>
+    <!-- ═══ Toast container ═══ -->
+    <div id="toast-container"></div>
+
+    <!-- ═══ App shell ═══ -->
+    <div class="app">
+      <!-- ─── Header ─── -->
+      <header class="header">
+        <div class="header-left">
+          <div class="logo">
+            <span class="material-symbols-rounded logo-icon">mail</span>
+            <span class="logo-text">Email Agent</span>
+          </div>
+        </div>
+        <div class="header-center">
+          <div class="search-box">
+            <span class="material-symbols-rounded search-icon">search</span>
+            <input
+              type="text"
+              id="search-input"
+              class="search-input"
+              placeholder="Search emails..."
+              autocomplete="off"
+            />
+            <button
+              id="search-clear"
+              class="search-clear hidden"
+              title="Clear search"
+            >
+              <span class="material-symbols-rounded">close</span>
+            </button>
+          </div>
+        </div>
+        <div class="header-right">
+          <div class="fetch-info" id="fetch-info"></div>
+          <button class="icon-btn" id="btn-refresh" title="Fetch new emails">
+            <span class="material-symbols-rounded">refresh</span>
+          </button>
+          <div class="llm-selector">
+            <select id="llm-select" class="select-input" title="LLM provider">
+              <option value="qwen_local_3b">Qwen 3B (Local)</option>
+              <option value="qwen_local_7b">Qwen 7B (Local)</option>
+              <option value="groq">Groq (Cloud)</option>
+            </select>
+          </div>
+          <button
+            class="icon-btn theme-toggle"
+            id="btn-theme"
+            title="Toggle theme"
+          >
+            <span class="material-symbols-rounded" id="theme-icon"
+              >dark_mode</span
+            >
+          </button>
+          <button class="btn btn-sm" id="btn-auth" title="Sign in / Sign out">
+            <span class="material-symbols-rounded" style="font-size: 16px"
+              >account_circle</span
+            >
+            <span id="auth-label">Sign in</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- ─── Main content ─── -->
+      <main class="main">
+        <!-- ▓▓ Left panel — Drafting / Todo / Categories ▓▓ -->
+        <section class="panel panel-left">
+          <nav class="panel-tabs" id="left-tabs">
+            <button class="tab active" data-tab="drafting">
+              <span class="material-symbols-rounded">edit_note</span>Drafting
+            </button>
+            <button class="tab" data-tab="todo">
+              <span class="material-symbols-rounded">checklist</span>Todo
+            </button>
+            <button class="tab" data-tab="categories">
+              <span class="material-symbols-rounded">label</span>Categories
+            </button>
+          </nav>
+          <div class="panel-body" id="left-content">
+            <!-- Rendered by JS -->
+          </div>
+        </section>
+
+        <!-- ▓▓ Right panel — Inbox / Compose ▓▓ -->
+        <section class="panel panel-right">
+          <nav class="panel-tabs" id="right-tabs">
+            <button class="tab active" data-tab="inbox">
+              <span class="material-symbols-rounded">inbox</span>Inbox
+            </button>
+            <button class="tab" data-tab="compose">
+              <span class="material-symbols-rounded">edit</span>Compose
+            </button>
+          </nav>
+          <div class="panel-body" id="right-content">
+            <!-- Rendered by JS -->
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+  </body>
+</html>
