@@ -1,1 +1,1 @@
-# Email Agent — AI Agent modules
+# Dispatch — AI Agent modules

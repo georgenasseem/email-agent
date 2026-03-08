@@ -28,6 +28,12 @@ data/*.db
 data/profile.json
 data/style_profile.json
 data/style_samples/
+data/settings.json
+
+# Backup files
+*.bak
+*.bak2
+*.old
 
 # OS
 .DS_Store

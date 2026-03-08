@@ -1,1 +1,1 @@
-# Email Agent — Tools (Gmail, etc.)
+# Dispatch — Tools (Gmail, etc.)

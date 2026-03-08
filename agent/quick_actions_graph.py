@@ -43,6 +43,7 @@ from agent.email_memory import (
     get_sender_history,
     get_todo_items,
 )
+from agent.profile import load_profile
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class QuickActionState(TypedDict, total=False):
     memory_context: str
     sender_history: str
     existing_todos: list[str]
+    user_identity: str          # "George Nasseem <gnn9245@nyu.edu>" — injected into LLM prompt
     raw_analysis: dict              # raw output from unified_analysis_node
     final_options: list[dict]       # validated, ranked, flat list
     no_action_message: str
@@ -70,7 +72,7 @@ def _sender_addr(email: dict) -> str:
 # ─── Node 0: Gather context ────────────────────────────────────────────────
 
 def gather_context_node(state: QuickActionState) -> dict:
-    """Pull memory context, sender history, and existing todos."""
+    """Pull memory context, sender history, existing todos, and user identity."""
     email = state.get("email") or {}
     memory_ctx = ""
     try:
@@ -95,64 +97,142 @@ def gather_context_node(state: QuickActionState) -> dict:
     except Exception:
         pass
 
+    # Load user identity so the LLM knows not to refer to the user as a third party
+    user_identity = ""
+    try:
+        profile = load_profile()
+        name = profile.get("display_name") or profile.get("first_name") or ""
+        email_addr = profile.get("email") or ""
+        if name or email_addr:
+            user_identity = f"{name} <{email_addr}>".strip(" <>") if name and email_addr else (name or email_addr)
+    except Exception:
+        pass
+
     return {
         "memory_context": memory_ctx,
         "sender_history": sender_history,
         "existing_todos": existing_todos,
+        "user_identity": user_identity,
     }
 
 
 # ─── Node 1: Unified analysis (single LLM call) ────────────────────────────
 
 _UNIFIED_SYSTEM = (
-    "You are an intelligent email assistant. Analyze the email below and identify "
-    "EVERY meaningful action the recipient might want to take.\n\n"
-    "Output a SINGLE JSON OBJECT with exactly three keys: \"replies\", \"todos\", \"meeting\".\n\n"
-    "--- REPLIES ---\n"
-    "Array of: {\"label\": \"...\", \"context\": \"...\"}\n"
-    "label: 2-6 word button text. SHORT and SPECIFIC — never generic.\n"
-    "context: 1-2 sentences for the AI drafter: sender name, exact topic, key details.\n\n"
-    "WHEN to include replies — be GENEROUS, err on the side of suggesting:\n"
-    "  YES: Email asks the user ANY question (even casual) → always reply\n"
-    "  YES: Personal / conversational email from a real person → suggest reply\n"
-    "  YES: Email requests help, info, files, or confirmation → offer options\n"
-    "  YES: Invitation (social, event, project) → suggest accept / decline\n"
-    "  YES: Email shares news where sender would value a reaction → brief reply\n"
-    "  NO:  Automated system (noreply, mailer-daemon, no-reply) → skip\n"
-    "  NO:  Pure newsletter/marketing with zero personal content → skip\n"
-    "  NO:  Receipt/order confirmation → skip unless it needs personal action\n\n"
-    "QUALITY — be SPECIFIC not generic:\n"
-    "  'Do you still have your guitars?' → [\"Yes, we still do\", \"We sold them\"] (real answers)\n"
-    "  'Can you send the report?' → [\"Send the report\", \"Need more time first\"]\n"
-    "  'Thanks for helping!' → [\"You're welcome\"] (warmth deserves a reply)\n"
-    "  NEVER suggest: 'Reply to email', 'Respond', 'Answer', 'Acknowledge email'\n"
-    "  Maximum 3 reply options.\n\n"
-    "--- TODOS ---\n"
-    "Array of: {\"label\": \"...\", \"context\": \"...\"}\n"
-    "label: 3-8 word task. ALWAYS include deadline/date when the email mentions one.\n"
-    "context: 1-2 sentences with full specifics: deadlines, links, names, document titles.\n\n"
-    "WHEN to include todos:\n"
-    "  YES: Email has a DEADLINE → capture it ('Submit form by Feb 27')\n"
-    "  YES: User is asked to prepare/review/write/complete something independently\n"
-    "  YES: Document to review, form to fill, link to visit, registration needed\n"
-    "  NO:  'Reply to this email' — goes in replies, not todos\n"
-    "  NO:  Vague non-actionable things ('look into it', 'check the email')\n"
-    "  NO:  Anything already in existing todos (listed in prompt if any)\n"
-    "  Maximum 3 todo items.\n\n"
-    "--- MEETING ---\n"
-    "Single object: {\"is_meeting\": true/false, \"context\": \"...\"}\n"
-    "is_meeting: true ONLY when a FUTURE meeting/event/scheduling discussion is the CORE topic.\n"
-    "context: who, what, when (if known), where/link — used to create a calendar event.\n\n"
-    "  YES: Meeting invitation ('Can we meet Tuesday at 3pm?')\n"
-    "  YES: Meeting reminder ('Don't forget our call tomorrow at 2pm')\n"
-    "  YES: Scheduling discussion ('Are you free Friday for a catch-up?')\n"
-    "  YES: Event invitation (workshop, conference, social gathering)\n"
-    "  NO:  Past meeting referenced as background ('as we discussed last week')\n"
-    "  NO:  Meeting mentioned incidentally, not the main topic\n\n"
-    "OUTPUT FORMAT — your entire response must be valid JSON, no markdown, no extra text:\n"
-    "{\"replies\": [{\"label\": \"...\", \"context\": \"...\"}, ...], "
-    "\"todos\": [{\"label\": \"...\", \"context\": \"...\"}, ...], "
-    "\"meeting\": {\"is_meeting\": false, \"context\": \"\"}}"
+    "You are a sharp, concise email assistant helping a busy professional decide what to do with an email.\n\n"
+    "Analyze the email and output a SINGLE JSON OBJECT with exactly three keys: \"replies\", \"todos\", \"meeting\".\n\n"
+
+    "═══ THE #1 RULE: BE SPECIFIC ═══\n"
+    "Every label and context MUST include concrete details FROM the email — names, subjects, dates,\n"
+    "amounts, items, document names, event names, deadlines. If the email is about Order #4829, the\n"
+    "label must say 'Order #4829'. If it's about a 'Quarterly Report', say 'Quarterly Report'.\n"
+    "NEVER use generic placeholders. Extract the actual nouns and details from the email body.\n\n"
+
+    "═══ CRITICAL CONTEXT RULES ═══\n"
+    "You MUST understand the email's context before generating suggestions:\n"
+    "  • Who is the sender? What is their relationship to the user?\n"
+    "  • What specifically is being asked or communicated?\n"
+    "  • Only suggest actions the user CAN actually take.\n"
+    "  • NEVER fabricate facts not present in the email (e.g. if the email says 'borrowed guitars', do NOT say 'sold guitars').\n"
+    "  • A reply is something the user would SEND TO THE SENDER — not a note to themselves.\n"
+    "  • 'Save for later', 'Set a reminder', 'Bookmark this' are NOT replies — they are todos.\n"
+    "  • NEVER suggest replying to automated emails, receipts, or notifications.\n"
+    "  • EXCEPTION: Emails from .edu senders (university LMS like Brightspace/Canvas) "
+    "often forward real messages from professors. If the email body explicitly asks "
+    "the user to reply or send something, treat it as a real request — suggest replies AND todos.\n\n"
+
+    "═══ REPLIES — what could the user SEND BACK to the sender? ═══\n"
+    "Array of {\"label\": \"...\", \"context\": \"...\"}\n\n"
+    "label rules:\n"
+    "  • 2–8 words. Written in FIRST PERSON as what the user would say back to the sender.\n"
+    "  • SPECIFIC to this email — include the actual topic/item/event name from the email.\n"
+    "  • Never generic: NO 'Reply', 'Respond', 'Acknowledge', 'Follow up', 'Confirm receipt'.\n"
+    "  • Think: if someone reads ONLY the label (not the email), they should understand what the reply is about.\n"
+    "  • Each reply must represent a DISTINCT choice — cover the realistic options the user has.\n"
+    "  • If the email presents a yes/no decision, provide both options.\n"
+    "  • If the email asks multiple questions, you may suggest a reply that addresses all of them.\n\n"
+    "Good label examples:\n"
+    "  Email from boss about Friday offsite: → [\"Yes, I'll join the offsite\", \"Can't make Friday's offsite\"]\n"
+    "  Email from colleague asking for Q3 report: → [\"Sending Q3 report now\", \"Need more time on Q3 report\"]\n"
+    "  Email thanking user for guitar help: → [\"Happy to help with the guitars\"]\n"
+    "  Email invitation to Sarah's birthday: → [\"I'll be at Sarah's birthday\", \"Can't make Sarah's party\"]\n"
+    "  Email about project Alpha deadline: → [\"Alpha will be ready on time\", \"Need extension on Alpha\"]\n\n"
+    "Bad label examples (NEVER do these):\n"
+    "  ✗ 'Reply to email', 'Send response', 'Answer question', 'Acknowledge receipt'\n"
+    "  ✗ 'Confirm attendance' (attendance to WHAT? Be specific!)\n"
+    "  ✗ 'Agree to proposal' (WHICH proposal? Name it!)\n"
+    "  ✗ 'Inform George about X' — NEVER refer to the user in third person\n"
+    "  ✗ 'Save for later', 'Set a reminder', 'Bookmark' — these are todos NOT replies\n"
+    "  ✗ 'We sold them' or any factual claim not in the email\n"
+    "  ✗ 'Let me know' — vague, not a real reply\n"
+    "  ✗ Two labels that say the same thing differently\n\n"
+    "When to include replies:\n"
+    "  YES: email asks a question or requests something from the user\n"
+    "  YES: conversational / personal email from a real person expecting a response\n"
+    "  YES: invitation that the user can accept or decline\n"
+    "  NO: automated / noreply sender (EXCEPT .edu senders — university LMS platforms like Brightspace/Canvas use noreply addresses to forward real professor messages that may require action)\n"
+    "  NO: pure newsletter, marketing email, or notification\n"
+    "  NO: receipt or order confirmation\n"
+    "  NO: announcements from institutions where a reply is not expected\n"
+    "Maximum 3 reply options.\n\n"
+    "context: 1–2 sentences with ALL concrete details the drafter needs: sender's full name,\n"
+    "the exact question asked, specific dates/amounts/items/documents mentioned, any constraints.\n"
+    "The drafter should be able to write a perfect reply using ONLY the context — no guessing.\n\n"
+
+    "═══ TODOS — what must the user DO on their own? ═══\n"
+    "Array of {\"label\": \"...\", \"context\": \"...\"}\n\n"
+    "label rules:\n"
+    "  • Start with an ACTION VERB: Submit, Review, Register, Sign, Upload, Complete…\n"
+    "  • MUST include the specific item/document/event/order name from the email.\n"
+    "  • Include the DEADLINE if mentioned: 'Submit thesis draft by Nov 15'\n"
+    "  • 3–10 words. Specific enough that the user knows EXACTLY what to do without reading the email.\n"
+    "  • The label alone must answer: WHAT specifically? For WHO/WHAT? By WHEN?\n\n"
+    "Good todo examples:\n"
+    "  Email about overdue library book 'Clean Code': → \"Return 'Clean Code' to library\"\n"
+    "  Email about AWS bill overdue: → \"Pay AWS invoice #7823 ($142)\"\n"
+    "  Email about project proposal from Dr. Smith due Mar 15: → \"Submit proposal to Dr. Smith by Mar 15\"\n"
+    "  Email about order #4829 delivery issue: → \"Check delivery status for order #4829\"\n"
+    "  Email about new employee onboarding docs: → \"Complete HR onboarding forms for new role\"\n"
+    "  Email about renewal of gym membership: → \"Renew gym membership before April 1\"\n\n"
+    "Bad todo examples (NEVER do these):\n"
+    "  ✗ 'Check item status' (WHAT item?!)\n"
+    "  ✗ 'Review order details' (WHICH order? What details?)\n"
+    "  ✗ 'Submit form' (WHAT form? To whom? By when?)\n"
+    "  ✗ 'Follow up' (With whom? About what?)\n"
+    "  ✗ 'Review document' (WHICH document?)\n"
+    "  ✗ 'Complete registration' (For what?)\n"
+    "  ✗ Any label where a reader couldn't act without re-reading the email\n\n"
+    "When to include todos:\n"
+    "  YES: any deadline mentioned\n"
+    "  YES: form to fill, document to review, link to visit, registration required\n"
+    "  YES: user asked to prepare or complete something independently\n"
+    "  YES: 'save for later', 'set a reminder' type actions belong HERE as todos\n"
+    "  NO: 'Reply to this email' — that belongs in replies\n"
+    "  NO: vague things that aren't real tasks\n"
+    "Maximum 3 todos.\n\n"
+
+    "═══ MEETING — is this about a future meeting the user can act on? ═══\n"
+    "Single object: {\"is_meeting\": true/false, \"context\": \"...\", \"actions\": [...]}\n"
+    "is_meeting: true ONLY when ALL of these are true:\n"
+    "  1. A FUTURE meeting/event is the CORE topic of the email\n"
+    "  2. The user has AGENCY to accept, decline, or propose changes\n"
+    "  3. The sender is directly inviting the user OR asking to schedule with them\n\n"
+    "is_meeting: false when:\n"
+    "  • The email is an announcement about a class, lecture, or fixed event the user cannot change\n"
+    "  • A professor/institution is announcing a schedule — user can only attend or not\n"
+    "  • The email mentions a past meeting\n"
+    "  • The meeting is already confirmed and no RSVP is needed\n"
+    "  • A Calendly link or scheduling tool is already provided (suggest using that tool instead)\n\n"
+    "actions: array of specific actions available. ONLY include actions that make sense:\n"
+    "  • \"accept\" — only if the user can RSVP yes to this specific meeting\n"
+    "  • \"decline\" — only if the user can decline (not for mandatory classes/lectures)\n"
+    "  • \"suggest_time\" — only if the meeting time is negotiable\n"
+    "  • \"cancel\" — only if the user organized the meeting and wants to cancel\n"
+    "Do NOT blindly include all three actions. Choose only the relevant ones.\n"
+    "context: attendees, event name, when if known, location/link.\n\n"
+
+    "OUTPUT — valid JSON only, no markdown:\n"
+    "{\"replies\":[{\"label\":\"...\",\"context\":\"...\"},...],\"todos\":[{\"label\":\"...\",\"context\":\"...\"},...],\"meeting\":{\"is_meeting\":false,\"context\":\"\",\"actions\":[]}}"
 )
 
 
@@ -170,10 +250,14 @@ def unified_analysis_node(state: QuickActionState) -> dict:
     memory_ctx = state.get("memory_context", "")
     sender_hist = state.get("sender_history", "")
     existing_todos = state.get("existing_todos", [])
+    user_identity = state.get("user_identity", "")
 
-    # Skip clearly automated senders
+    # Skip clearly automated senders — but exempt .edu senders
+    # because universities use noreply addresses for LMS platforms
+    # (Brightspace, Canvas, Blackboard) that forward real professor messages
     sender_lower = sender.lower()
-    if any(s in sender_lower for s in [
+    _is_edu_sender = ".edu" in sender_lower
+    if not _is_edu_sender and any(s in sender_lower for s in [
         "noreply", "no-reply", "mailer-daemon", "donotreply",
         "notifications@", "alerts@", "automated@",
     ]):
@@ -185,6 +269,20 @@ def unified_analysis_node(state: QuickActionState) -> dict:
             f"- {t}" for t in existing_todos[:12]
         )
 
+    identity_block = ""
+    if user_identity:
+        # Extract first name for additional filtering
+        first_name = user_identity.split()[0] if user_identity.split() else ""
+        identity_block = (
+            f"\nIMPORTANT: The person reading this email is {user_identity}. "
+            "They are the RECIPIENT. Never write reply labels that refer to them "
+            "by their own name as if they were a third party (e.g. do NOT write "
+            f"'Explain X to {first_name}' or 'Inform {first_name} about Y' — "
+            "write 'I'll explain X' or just 'Explain X').\n"
+            "The user is the one reading and acting on this email — all replies "
+            "should be from THEIR perspective as THE SENDER of the reply.\n"
+        )
+
     prompt = (
         f"From: {sender}\n"
         f"Subject: {subject}\n"
@@ -192,7 +290,8 @@ def unified_analysis_node(state: QuickActionState) -> dict:
         f"Thread context: {thread_ctx}\n"
         f"{memory_ctx}\n"
         f"{sender_hist}\n"
-        f"{existing_block}\n\n"
+        f"{existing_block}\n"
+        f"{identity_block}\n"
         "Analyze this email and output the JSON object with replies, todos, and meeting info:"
     )
 
@@ -240,6 +339,16 @@ def validate_and_rank_node(state: QuickActionState) -> dict:
     """
     raw = state.get("raw_analysis") or {}
     existing_todos = state.get("existing_todos", [])
+    user_identity = state.get("user_identity", "")
+    # Extract user's first name for filtering self-references
+    user_first = user_identity.split()[0].lower() if user_identity and user_identity.split() else ""
+
+    # Labels that are personal tasks, NOT replies to send
+    _NOT_REPLY_LABELS = {
+        "save for later", "set a reminder", "bookmark", "bookmark this",
+        "mark as read", "mark as unread", "archive", "snooze",
+        "remind me", "follow up later", "note to self",
+    }
 
     # ── Parse replies ──────────────────────────────────────────────
     reply_actions: list[dict] = []
@@ -256,6 +365,12 @@ def validate_and_rank_node(state: QuickActionState) -> dict:
             continue
         if _is_task_not_reply(label):
             continue  # task mistakenly placed in replies
+        # Filter out self-referencing labels
+        label_lower = label.lower()
+        if label_lower in _NOT_REPLY_LABELS:
+            continue
+        if user_first and (f"inform {user_first}" in label_lower or f"tell {user_first}" in label_lower or f"notify {user_first}" in label_lower or f"to {user_first}" in label_lower):
+            continue
         reply_actions.append({
             "type": "reply",
             "label": label[:80],
@@ -288,11 +403,32 @@ def validate_and_rank_node(state: QuickActionState) -> dict:
     meeting_info = raw.get("meeting") or {}
     if isinstance(meeting_info, dict) and meeting_info.get("is_meeting"):
         ctx = str(meeting_info.get("context", "")).strip()
-        meeting_actions = [
-            {"type": "meeting", "label": "Accept meeting",        "context": f"Accept the meeting. {ctx}".strip(), "meeting_action": "accept"},
-            {"type": "meeting", "label": "Decline meeting",       "context": f"Decline the meeting. {ctx}".strip(), "meeting_action": "decline"},
-            {"type": "meeting", "label": "Suggest different time", "context": f"Propose a new time. {ctx}".strip(), "meeting_action": "reschedule"},
-        ]
+        available_actions = meeting_info.get("actions", [])
+        if not isinstance(available_actions, list):
+            available_actions = []
+
+        action_map = {
+            "accept": {"label": "Accept meeting", "meeting_action": "accept"},
+            "decline": {"label": "Decline meeting", "meeting_action": "decline"},
+            "suggest_time": {"label": "Suggest different time", "meeting_action": "reschedule"},
+            "cancel": {"label": "Cancel meeting", "meeting_action": "cancel"},
+        }
+        for action_key in available_actions:
+            action_key = str(action_key).strip().lower()
+            if action_key in action_map:
+                info = action_map[action_key]
+                meeting_actions.append({
+                    "type": "meeting",
+                    "label": info["label"],
+                    "context": f"{info['label']}. {ctx}".strip(),
+                    "meeting_action": info["meeting_action"],
+                })
+        # Fallback: if LLM returned is_meeting=true but no valid actions, use accept+decline
+        if not meeting_actions:
+            meeting_actions = [
+                {"type": "meeting", "label": "Accept meeting", "context": f"Accept the meeting. {ctx}".strip(), "meeting_action": "accept"},
+                {"type": "meeting", "label": "Decline meeting", "context": f"Decline the meeting. {ctx}".strip(), "meeting_action": "decline"},
+            ]
 
     # ── Deduplicate reply + todo (meetings are always kept whole) ──
     final: list[dict] = []

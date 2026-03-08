@@ -169,6 +169,18 @@ def init_db() -> None:
             """
         )
 
+        # ── Completed tasks table ───────────────────────────────────────
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS completed_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email_id TEXT,
+                task TEXT NOT NULL,
+                completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
         # ── Persistent knowledge base ───────────────────────────────────
         cur.execute(
             """

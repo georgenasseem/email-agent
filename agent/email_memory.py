@@ -726,12 +726,28 @@ def get_todo_items() -> List[dict]:
 
 
 def remove_todo_item(item_id: int) -> None:
-    """Remove a todo item by ID."""
+    """Move a todo item to completed_tasks, then remove from active list."""
     init_db()
     with get_connection() as conn:
         cur = conn.cursor()
+        cur.execute("SELECT email_id, task FROM todo_items WHERE id = ?", (item_id,))
+        row = cur.fetchone()
+        if row:
+            cur.execute(
+                "INSERT INTO completed_tasks (email_id, task) VALUES (?, ?)",
+                (row[0], row[1]),
+            )
         cur.execute("DELETE FROM todo_items WHERE id = ?", (item_id,))
         conn.commit()
+
+
+def get_completed_tasks() -> List[str]:
+    """Return all completed task labels (lowercase) for dedup."""
+    init_db()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT task FROM completed_tasks")
+        return [r[0].lower() for r in cur.fetchall()]
 
 
 # ─── Knowledge base ─────────────────────────────────────────────────────────
@@ -1126,6 +1142,45 @@ def delete_rule(rule_id: int) -> None:
         cur = conn.cursor()
         cur.execute("DELETE FROM category_rules WHERE id = ?", (rule_id,))
         conn.commit()
+
+
+def retag_emails_supplementary(label_slug: str, label_name: str, emails: list[dict]) -> int:
+    """Scan in-memory emails and tag those matching the supplementary category.
+
+    Uses a simple keyword match on the label name against subject and body.
+    Returns the count of emails updated.
+    """
+    init_db()
+    keywords = [w.lower() for w in label_name.split() if len(w) > 2]
+    if not keywords:
+        return 0
+
+    updated = 0
+    with get_connection() as conn:
+        cur = conn.cursor()
+        for email in emails:
+            gmail_id = email.get("id", "")
+            category = (email.get("category") or "informational").strip()
+            main_cat, extras = _parse_category_tags(category)
+
+            if label_slug in extras or label_slug == main_cat:
+                continue  # already tagged
+
+            # Check if keywords match in subject or body
+            subject = (email.get("subject") or "").lower()
+            body = (email.get("clean_body") or email.get("body") or email.get("snippet") or "").lower()
+            text = subject + " " + body
+
+            if any(kw in text for kw in keywords):
+                new_cat = _build_category_string(main_cat, extras + [label_slug])
+                email["category"] = new_cat
+                cur.execute(
+                    "UPDATE email_processed SET category = ? WHERE gmail_id = ?",
+                    (new_cat, gmail_id),
+                )
+                updated += 1
+        conn.commit()
+    return updated
 
 
 def match_rules_for_email(email: dict) -> Optional[str]:

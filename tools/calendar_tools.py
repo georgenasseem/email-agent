@@ -98,6 +98,7 @@ def find_free_slots(
     time_max: datetime,
     duration_minutes: int = 30,
     calendar_id: str = "primary",
+    extra_attendees: list[str] | None = None,
     respect_working_hours: bool = True,
 ) -> list[tuple[datetime, datetime]]:
     """Find free time slots between time_min and time_max.
@@ -105,6 +106,8 @@ def find_free_slots(
     Uses the freebusy API to get busy periods, then computes gaps >= duration_minutes.
     When respect_working_hours=True, only returns slots within 9-17 hours,
     skipping the lunch break (12-13) and adding a gap between consecutive slots.
+    If extra_attendees is provided, their calendars are also queried and their
+    busy times are merged in (only includes slots free for everyone).
 
     Returns list of (start, end) datetime tuples for free slots.
     """
@@ -112,29 +115,34 @@ def find_free_slots(
     tmin_str = _to_rfc3339(time_min)
     tmax_str = _to_rfc3339(time_max)
 
+    all_calendar_ids = [calendar_id] + (extra_attendees or [])
+    items = [{"id": cid} for cid in all_calendar_ids]
+
     freebusy = (
         service.freebusy()
         .query(
             body={
                 "timeMin": tmin_str,
                 "timeMax": tmax_str,
-                "items": [{"id": calendar_id}],
+                "items": items,
             }
         )
         .execute()
     )
 
     busy_list = []
-    cal_data = freebusy.get("calendars", {}).get(calendar_id, {})
     tz = time_min.tzinfo or timezone.utc
-    for b in cal_data.get("busy", []):
-        start = _parse_rfc3339(b["start"])
-        end = _parse_rfc3339(b["end"])
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=tz)
-        if end.tzinfo is None:
-            end = end.replace(tzinfo=tz)
-        busy_list.append((start, end))
+    calendars = freebusy.get("calendars", {})
+    for cid in all_calendar_ids:
+        cal_data = calendars.get(cid, {})
+        for b in cal_data.get("busy", []):
+            start = _parse_rfc3339(b["start"])
+            end = _parse_rfc3339(b["end"])
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=tz)
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=tz)
+            busy_list.append((start, end))
 
     busy_list.sort(key=lambda x: x[0])
     duration_delta = timedelta(minutes=duration_minutes)

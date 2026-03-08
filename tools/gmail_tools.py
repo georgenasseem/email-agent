@@ -377,6 +377,7 @@ def send_email(
     subject: str,
     body: str,
     thread_id: Optional[str] = None,
+    cc: Optional[str] = None,
 ) -> dict:
     """Send an email via Gmail API. Returns the send response dict."""
     from email.mime.text import MIMEText
@@ -387,6 +388,8 @@ def send_email(
     message = MIMEMultipart()
     message["to"] = to
     message["subject"] = subject
+    if cc:
+        message["cc"] = cc
     message.attach(MIMEText(body, "plain"))
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()

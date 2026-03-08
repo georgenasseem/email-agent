@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Email Agent</title>
+    <title>Dispatch</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -17,105 +17,117 @@
     <link rel="stylesheet" href="/static/css/style.css" />
   </head>
   <body>
-    <!-- ═══ Toast container ═══ -->
     <div id="toast-container"></div>
-
-    <!-- ═══ App shell ═══ -->
     <div class="app">
-      <!-- ─── Header ─── -->
-      <header class="header">
-        <div class="header-left">
-          <div class="logo">
-            <span class="material-symbols-rounded logo-icon">mail</span>
-            <span class="logo-text">Email Agent</span>
-          </div>
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="topbar-icon" id="btn-menu" title="Toggle sidebar">
+            <span class="material-symbols-rounded">menu</span>
+          </button>
+          <span class="material-symbols-rounded topbar-ai-icon">auto_awesome</span>
+          <span class="topbar-app-name">Dispatch</span>
         </div>
-        <div class="header-center">
-          <div class="search-box">
-            <span class="material-symbols-rounded search-icon">search</span>
+        <div class="topbar-center">
+          <div class="search-bar">
+            <span class="material-symbols-rounded search-ico">search</span>
             <input
               type="text"
               id="search-input"
-              class="search-input"
-              placeholder="Search emails..."
+              placeholder="Search emails"
               autocomplete="off"
             />
+            <button id="search-clear" class="search-clear hidden" title="Clear">
+              <span class="material-symbols-rounded">close</span>
+            </button>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <span class="fetch-info" id="fetch-info"></span>
+          <div class="llm-picker-topbar">
+            <span class="material-symbols-rounded llm-ico">smart_toy</span>
+            <select id="llm-select" title="AI engine">
+              <option value="qwen_local_3b">3B Local</option>
+              <option value="qwen_local_7b">7B Local</option>
+              <option value="groq">Cloud</option>
+            </select>
+          </div>
+          <button class="topbar-icon" id="btn-refresh" title="Fetch inbox">
+            <span class="material-symbols-rounded fetch-icon"
+              >move_to_inbox</span
+            >
+          </button>
+          <button class="topbar-icon" id="btn-theme" title="Toggle theme">
+            <span class="material-symbols-rounded" id="theme-icon"
+              >dark_mode</span
+            >
+          </button>
+          <button class="auth-btn" id="btn-auth">
+            <span class="material-symbols-rounded">account_circle</span>
+            <span id="auth-label">Sign in</span>
+          </button>
+        </div>
+      </header>
+      <div class="app-body" id="app-body">
+        <aside class="sidebar" id="sidebar">
+          <button class="compose-btn" id="btn-compose">
+            <span class="material-symbols-rounded">edit</span>
+            <span class="compose-label">Compose</span>
+          </button>
+          <nav class="sidebar-nav" id="sidebar-nav">
+            <button class="nav-item active" data-view="inbox">
+              <span class="material-symbols-rounded nav-ico">inbox</span>
+              <span class="nav-text">Inbox</span>
+              <span class="nav-badge" id="inbox-badge"></span>
+            </button>
+            <button class="nav-item" data-view="todo">
+              <span class="material-symbols-rounded nav-ico">task_alt</span>
+              <span class="nav-text">Todo</span>
+            </button>
+            <button class="nav-item" data-view="meetings">
+              <span class="material-symbols-rounded nav-ico">event</span>
+              <span class="nav-text">Meetings</span>
+            </button>
+            <button class="nav-item" data-view="labels">
+              <span class="material-symbols-rounded nav-ico">label</span>
+              <span class="nav-text">Labels</span>
+            </button>
+          </nav>
+        </aside>
+        <section class="list-pane" id="list-pane"></section>
+        <section class="detail-pane" id="detail-pane"></section>
+      </div>
+      <div class="compose-float hidden" id="compose-float">
+        <div class="compose-float-header" id="compose-float-header">
+          <span class="compose-float-title" id="compose-float-title"
+            >New Message</span
+          >
+          <div class="compose-float-controls">
             <button
-              id="search-clear"
-              class="search-clear hidden"
-              title="Clear search"
+              class="compose-float-btn"
+              id="compose-float-minimize"
+              title="Minimize"
+            >
+              <span class="material-symbols-rounded">minimize</span>
+            </button>
+            <button
+              class="compose-float-btn"
+              id="compose-float-expand"
+              title="Expand"
+            >
+              <span class="material-symbols-rounded">open_in_full</span>
+            </button>
+            <button
+              class="compose-float-btn"
+              id="compose-float-close"
+              title="Close"
             >
               <span class="material-symbols-rounded">close</span>
             </button>
           </div>
         </div>
-        <div class="header-right">
-          <div class="fetch-info" id="fetch-info"></div>
-          <button class="icon-btn" id="btn-refresh" title="Fetch new emails">
-            <span class="material-symbols-rounded">refresh</span>
-          </button>
-          <div class="llm-selector">
-            <select id="llm-select" class="select-input" title="LLM provider">
-              <option value="qwen_local_3b">Qwen 3B (Local)</option>
-              <option value="qwen_local_7b">Qwen 7B (Local)</option>
-              <option value="groq">Groq (Cloud)</option>
-            </select>
-          </div>
-          <button
-            class="icon-btn theme-toggle"
-            id="btn-theme"
-            title="Toggle theme"
-          >
-            <span class="material-symbols-rounded" id="theme-icon"
-              >dark_mode</span
-            >
-          </button>
-          <button class="btn btn-sm" id="btn-auth" title="Sign in / Sign out">
-            <span class="material-symbols-rounded" style="font-size: 16px"
-              >account_circle</span
-            >
-            <span id="auth-label">Sign in</span>
-          </button>
-        </div>
-      </header>
-
-      <!-- ─── Main content ─── -->
-      <main class="main">
-        <!-- ▓▓ Left panel — Drafting / Todo / Categories ▓▓ -->
-        <section class="panel panel-left">
-          <nav class="panel-tabs" id="left-tabs">
-            <button class="tab active" data-tab="drafting">
-              <span class="material-symbols-rounded">edit_note</span>Drafting
-            </button>
-            <button class="tab" data-tab="todo">
-              <span class="material-symbols-rounded">checklist</span>Todo
-            </button>
-            <button class="tab" data-tab="categories">
-              <span class="material-symbols-rounded">label</span>Categories
-            </button>
-          </nav>
-          <div class="panel-body" id="left-content">
-            <!-- Rendered by JS -->
-          </div>
-        </section>
-
-        <!-- ▓▓ Right panel — Inbox / Compose ▓▓ -->
-        <section class="panel panel-right">
-          <nav class="panel-tabs" id="right-tabs">
-            <button class="tab active" data-tab="inbox">
-              <span class="material-symbols-rounded">inbox</span>Inbox
-            </button>
-            <button class="tab" data-tab="compose">
-              <span class="material-symbols-rounded">edit</span>Compose
-            </button>
-          </nav>
-          <div class="panel-body" id="right-content">
-            <!-- Rendered by JS -->
-          </div>
-        </section>
-      </main>
+        <div class="compose-float-body" id="compose-float-body"></div>
+      </div>
     </div>
-
     <script src="/static/js/app.js"></script>
   </body>
 </html>

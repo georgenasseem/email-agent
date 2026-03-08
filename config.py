@@ -1,4 +1,4 @@
-"""Configuration and environment variables for the Email Agent."""
+"""Configuration and environment variables for Dispatch."""
 import os
 from pathlib import Path
 from dotenv import load_dotenv
